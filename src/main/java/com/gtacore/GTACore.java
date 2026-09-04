@@ -21,6 +21,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 
@@ -173,11 +174,27 @@ public class GTACore {
      * AI a true STRAIGHT state instead of constantly twitching left
      * and right.
      */
-    private static final double AI_STEERING_DEADZONE = 2.5;
-    private static final double AI_STEERING_GAIN = 0.38;
-    private static final double AI_LOW_SPEED_MAX_STEERING = 24.0;
-    private static final double AI_HIGH_SPEED_MAX_STEERING = 9.0;
+    /*
+     * Good alignment is enough.  The AI deliberately stops correcting
+     * once it is within this many degrees of the target heading.
+     */
+    private static final double AI_STEERING_DEADZONE = 6.0;
+    private static final double AI_STEERING_GAIN = 0.34;
+    private static final double AI_LOW_SPEED_MAX_STEERING = 22.0;
+    private static final double AI_HIGH_SPEED_MAX_STEERING = 8.0;
     private static final double AI_STEERING_SPEED_REDUCTION = 2.0;
+
+    /*
+     * Fine corrections are taps, not held steering.
+     *
+     * Below STEERING_TAP_MAX_ERROR the AI briefly nudges the wheel,
+     * releases it back to center, observes the new heading, and only
+     * then decides whether another tap is needed.
+     */
+    private static final double STEERING_TAP_MAX_ERROR = 28.0;
+    private static int steeringTapTicksRemaining = 0;
+    private static int steeringTapRestTicksRemaining = 0;
+    private static double steeringTapDirection = 0.0;
 
     /*
      * Speed controller values are in approximate blocks/second.
@@ -392,15 +409,55 @@ public class GTACore {
                             followTurnDirection = 1.0;
                             homeTurnPhase = HOME_TURN_FOLLOW;
                             homeTurnDirection = 1.0;
-                            throttleCommand = 1.0;
+                            throttleCommand = 0.0;
+                            brakeCommand = 1.0;
                             steeringTarget = 0.0;
                             steeringCurrent = 0.0;
+                            steeringTapTicksRemaining = 0;
+                            steeringTapRestTicksRemaining = 0;
+                            steeringTapDirection = 0.0;
+
+                            try {
+
+                                Object selectedVehicle =
+                                    getInternalMTSEntity(
+                                        closestVehicle
+                                    );
+
+                                /*
+                                 * Selection automatically converts the
+                                 * car into a GTACore service vehicle:
+                                 * fuel it completely now and keep it full.
+                                 */
+                                refillServiceFuel(
+                                    selectedVehicle
+                                );
+
+                                serviceVehicles.add(
+                                    selectedCar
+                                );
+
+                            } catch (Exception fuelError) {
+
+                                selectedCar = null;
+
+                                fuelError.printStackTrace();
+
+                                context.getSource()
+                                    .sendFailure(
+                                        Component.literal(
+                                            "Vehicle found, but GTACore could not determine/fill its fuel."
+                                        )
+                                    );
+
+                                return 0;
+                            }
 
                             context.getSource()
                                 .sendSuccess(
                                     () ->
                                         Component.literal(
-                                            "MTS vehicle selected."
+                                            "MTS vehicle selected. Fuel locked at 100%."
                                         ),
                                     false
                                 );
@@ -936,6 +993,31 @@ public class GTACore {
                                 context.getSource()
                                     .getPlayerOrException();
 
+                            /*
+                             * Preparation happens before follow mode is
+                             * enabled: full fuel first, then engine start.
+                             */
+                            try {
+
+                                prepareSelectedVehicleForAction(
+                                    context.getSource()
+                                        .getServer()
+                                );
+
+                            } catch (Exception startError) {
+
+                                startError.printStackTrace();
+
+                                context.getSource()
+                                    .sendFailure(
+                                        Component.literal(
+                                            "Could not fuel/start the selected vehicle."
+                                        )
+                                    );
+
+                                return 0;
+                            }
+
                             returningHome = false;
                             homeTurnPhase = HOME_TURN_FOLLOW;
                             homeTurnDirection = 1.0;
@@ -952,10 +1034,6 @@ public class GTACore {
                             followTurnDirection = 1.0;
                             followTurnTicks = 0;
                             followTurnCooldownTicks = 0;
-
-                            requestAutoStart(
-                                context.getSource().getServer()
-                            );
 
                             context.getSource()
                                 .sendSuccess(
@@ -1232,6 +1310,64 @@ public class GTACore {
                 wrapper == null
             ) {
                 return;
+            }
+
+            /*
+             * The selected GTACore car is kept physically full every
+             * tick.  This happens before any engine-start or AI logic.
+             */
+            if (
+                serviceVehicles.contains(
+                    selectedCar
+                )
+            ) {
+                refillServiceFuel(
+                    vehicle
+                );
+            }
+
+            boolean autonomousAction =
+                followTargetId != null ||
+                returningHome;
+
+            if (autonomousAction) {
+
+                ensureVehicleStarted(
+                    vehicle
+                );
+
+                boolean engineReady =
+                    getBooleanField(
+                        vehicle,
+                        "enginesRunning"
+                    );
+
+                if (!engineReady) {
+
+                    driveForward = false;
+                    driveReverse = false;
+                    throttleCommand = 0.0;
+                    brakeCommand = 1.0;
+                    steeringTarget = 0.0;
+
+                    updateSteering(
+                        vehicle
+                    );
+
+                    setMTSVariable(
+                        vehicle,
+                        "throttleVar",
+                        0.0
+                    );
+
+                    setMTSVariable(
+                        vehicle,
+                        "brakeVar",
+                        1.0
+                    );
+
+                    return;
+                }
             }
 
             if (
@@ -1974,20 +2110,46 @@ public class GTACore {
             );
 
         /*
-         * This is the explicit STRAIGHT state the old controller was
-         * missing.
+         * Do not demand mathematical perfection.  If we are within
+         * the alignment band, release the wheel completely.
          */
         if (
             absoluteError <=
                 AI_STEERING_DEADZONE
         ) {
+
+            resetSteeringTap();
+
             return 0.0;
         }
 
+        double direction =
+            Math.signum(
+                headingError
+            );
+
         /*
-         * Faster car = smaller maximum wheel angle.
-         * This reduces dirt-surface drifting and over-correction.
+         * If we just crossed the desired heading, center the wheel
+         * for one decision cycle instead of immediately holding the
+         * opposite correction.  This is the key anti-oscillation
+         * behavior for small corrections.
          */
+        if (
+            steeringTapDirection != 0.0 &&
+            direction !=
+                steeringTapDirection
+        ) {
+
+            resetSteeringTap();
+
+            steeringTapDirection =
+                direction;
+
+            steeringTapRestTicksRemaining = 1;
+
+            return 0.0;
+        }
+
         double speedLimitedMaximum =
             clamp(
                 AI_LOW_SPEED_MAX_STEERING -
@@ -1998,22 +2160,80 @@ public class GTACore {
             );
 
         double requested =
-            headingError *
-                AI_STEERING_GAIN;
+            clamp(
+                headingError *
+                    AI_STEERING_GAIN,
+                -speedLimitedMaximum,
+                speedLimitedMaximum
+            );
 
         /*
-         * Near straight, soften the steering even further so the AI
-         * settles at center rather than bouncing around it.
+         * Large turns may be held because the car genuinely needs a
+         * sustained arc.  Fine/medium corrections are tapped.
          */
-        if (absoluteError < 10.0) {
-            requested *= 0.55;
+        if (
+            absoluteError >
+                STEERING_TAP_MAX_ERROR
+        ) {
+
+            resetSteeringTap();
+
+            steeringTapDirection =
+                direction;
+
+            return requested;
         }
 
-        return clamp(
-            requested,
-            -speedLimitedMaximum,
-            speedLimitedMaximum
-        );
+        steeringTapDirection =
+            direction;
+
+        if (
+            steeringTapRestTicksRemaining > 0
+        ) {
+
+            steeringTapRestTicksRemaining--;
+
+            return 0.0;
+        }
+
+        if (
+            steeringTapTicksRemaining <= 0
+        ) {
+
+            /*
+             * Tiny error: one-tick nudge, then a long coast.
+             * Medium error: two-tick nudge, then a shorter coast.
+             */
+            if (absoluteError < 14.0) {
+
+                steeringTapTicksRemaining = 1;
+
+            } else {
+
+                steeringTapTicksRemaining = 2;
+            }
+        }
+
+        steeringTapTicksRemaining--;
+
+        if (
+            steeringTapTicksRemaining <= 0
+        ) {
+
+            steeringTapRestTicksRemaining =
+                absoluteError < 14.0
+                    ? 4
+                    : 2;
+        }
+
+        return requested;
+    }
+
+    private static void resetSteeringTap() {
+
+        steeringTapTicksRemaining = 0;
+        steeringTapRestTicksRemaining = 0;
+        steeringTapDirection = 0.0;
     }
 
     private static double getVehicleSpeedBlocksPerSecond(
@@ -2431,24 +2651,25 @@ public class GTACore {
                 );
 
         /*
-         * The first version of this system learns the fuel type
-         * from an already-fueled vehicle.
-         *
-         * Once we add the police vehicle template factory,
-         * spawned cruisers will already contain their correct fuel.
+         * If the tank is completely empty, infer the correct fuel
+         * from the installed MTS engine and MTS's own fuel config.
          */
         if (
             fluid == null ||
             fluid.isEmpty()
         ) {
 
-            throw new IllegalStateException(
-                "Fuel tank is empty, so GTACore cannot determine the correct fuel type."
-            );
+            fluid =
+                determineVehicleFuel(
+                    vehicle
+                );
+
+            fluidMod = "";
         }
 
         double missingFuel =
-            maxLevel - currentLevel;
+            maxLevel -
+            currentLevel;
 
         if (missingFuel <= 0.001) {
             return;
@@ -2465,12 +2686,223 @@ public class GTACore {
                     boolean.class
                 );
 
-        fill.invoke(
-            fuelTank,
-            fluid,
-            fluidMod,
-            missingFuel,
-            true
+        double amountFilled =
+            ((Number)
+                fill.invoke(
+                    fuelTank,
+                    fluid,
+                    fluidMod,
+                    missingFuel,
+                    true
+                )
+            ).doubleValue();
+
+        if (
+            amountFilled <= 0.0 &&
+            missingFuel > 0.001
+        ) {
+
+            throw new IllegalStateException(
+                "MTS rejected automatic fuel: "
+                    + fluid
+            );
+        }
+    }
+
+    private static String determineVehicleFuel(
+        Object vehicle
+    ) throws Exception {
+
+        List<?> engines =
+            getEngines(
+                vehicle
+            );
+
+        if (engines.isEmpty()) {
+
+            throw new IllegalStateException(
+                "Cannot determine fuel: vehicle has no engine."
+            );
+        }
+
+        Object engine =
+            engines.get(0);
+
+        Object definition =
+            getFieldValue(
+                engine,
+                "definition"
+            );
+
+        Object engineDefinition =
+            getFieldValue(
+                definition,
+                "engine"
+            );
+
+        String fuelType =
+            String.valueOf(
+                getFieldValue(
+                    engineDefinition,
+                    "fuelType"
+                )
+            );
+
+        Object engineType =
+            getFieldValue(
+                engineDefinition,
+                "type"
+            );
+
+        if (
+            engineType != null &&
+            "ELECTRIC".equalsIgnoreCase(
+                engineType.toString()
+            )
+        ) {
+
+            return "electricity";
+        }
+
+        Class<?> configSystem =
+            Class.forName(
+                "minecrafttransportsimulator.systems.ConfigSystem"
+            );
+
+        Field settingsField =
+            findField(
+                configSystem,
+                "settings"
+            );
+
+        if (settingsField == null) {
+
+            throw new NoSuchFieldException(
+                "ConfigSystem.settings"
+            );
+        }
+
+        settingsField.setAccessible(true);
+
+        Object settings =
+            settingsField.get(
+                null
+            );
+
+        Object fuelSettings =
+            getFieldValue(
+                settings,
+                "fuel"
+            );
+
+        Object fuelsObject =
+            getFieldValue(
+                fuelSettings,
+                "fuels"
+            );
+
+        if (!(fuelsObject instanceof Map)) {
+
+            throw new IllegalStateException(
+                "MTS fuel config is not a map."
+            );
+        }
+
+        Map<?, ?> fuelTypes =
+            (Map<?, ?>)
+                fuelsObject;
+
+        Object candidatesObject =
+            fuelTypes.get(
+                fuelType
+            );
+
+        if (!(candidatesObject instanceof Map)) {
+
+            throw new IllegalStateException(
+                "No MTS fuels configured for engine type "
+                    + fuelType
+            );
+        }
+
+        Map<?, ?> candidates =
+            (Map<?, ?>)
+                candidatesObject;
+
+        /*
+         * Prefer the canonical fluid matching the engine name
+         * (gasoline -> gasoline, diesel -> diesel) rather than a
+         * fallback such as lava that may have equal configured
+         * potency.
+         */
+        String canonical =
+            fuelType.toLowerCase();
+
+        if (
+            candidates.containsKey(
+                canonical
+            )
+        ) {
+
+            return canonical;
+        }
+
+        String bestFluid = null;
+        double bestPotency =
+            -Double.MAX_VALUE;
+
+        for (
+            Map.Entry<?, ?> entry :
+            candidates.entrySet()
+        ) {
+
+            String candidate =
+                String.valueOf(
+                    entry.getKey()
+                );
+
+            if (
+                "lava".equalsIgnoreCase(
+                    candidate
+                )
+            ) {
+                continue;
+            }
+
+            if (!(entry.getValue() instanceof Number)) {
+                continue;
+            }
+
+            double potency =
+                ((Number)
+                    entry.getValue()
+                ).doubleValue();
+
+            if (
+                bestFluid == null ||
+                potency > bestPotency
+            ) {
+
+                bestFluid = candidate;
+                bestPotency = potency;
+            }
+        }
+
+        if (bestFluid != null) {
+            return bestFluid;
+        }
+
+        /*
+         * Last fallback: if lava is literally the only configured
+         * valid option, use the first configured entry.
+         */
+        for (Object candidate : candidates.keySet()) {
+            return String.valueOf(candidate);
+        }
+
+        throw new IllegalStateException(
+            "No fuel candidates configured for "
+                + fuelType
         );
     }
 
@@ -2500,6 +2932,41 @@ public class GTACore {
         return null;
     }
 
+    private static void prepareSelectedVehicleForAction(
+        MinecraftServer server
+    ) throws Exception {
+
+        Object vehicle =
+            getSelectedVehicle(
+                server
+            );
+
+        if (vehicle == null) {
+
+            throw new IllegalStateException(
+                "Selected vehicle is not loaded."
+            );
+        }
+
+        /*
+         * Order matters:
+         * 1. Make sure the tank is full.
+         * 2. Mark it as permanently serviced.
+         * 3. Start the engine.
+         */
+        refillServiceFuel(
+            vehicle
+        );
+
+        serviceVehicles.add(
+            selectedCar
+        );
+
+        ensureVehicleStarted(
+            vehicle
+        );
+    }
+
     private static void requestAutoStart(
         MinecraftServer server
     ) {
@@ -2512,6 +2979,17 @@ public class GTACore {
                 );
 
             if (vehicle != null) {
+
+                refillServiceFuel(
+                    vehicle
+                );
+
+                if (selectedCar != null) {
+                    serviceVehicles.add(
+                        selectedCar
+                    );
+                }
+
                 ensureVehicleStarted(
                     vehicle
                 );
@@ -2983,6 +3461,19 @@ public class GTACore {
                 "Following: "
                     + (followTargetId != null)
                     + " | AI mode: forward-only"
+            ),
+            false
+        );
+
+        source.sendSuccess(
+            () -> Component.literal(
+                "Fuel lock: "
+                    + (
+                        selectedCar != null &&
+                        serviceVehicles.contains(
+                            selectedCar
+                        )
+                    )
             ),
             false
         );
