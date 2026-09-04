@@ -165,11 +165,41 @@ public class GTACore {
      * Reverse remains available as a manual debug command, but is
      * intentionally excluded from driver AI for now.
      */
-    private static final double AI_MAX_STEERING = 20.0;
-    private static final double AI_HARD_TURN_THROTTLE = 0.09;
-    private static final double AI_MEDIUM_TURN_THROTTLE = 0.14;
-    private static final double AI_LIGHT_TURN_THROTTLE = 0.20;
-    private static final double AI_STRAIGHT_THROTTLE = 0.30;
+    /*
+     * Precision steering controller.
+     *
+     * Small heading errors become small wheel angles, large errors
+     * become larger wheel angles, and an actual dead-zone gives the
+     * AI a true STRAIGHT state instead of constantly twitching left
+     * and right.
+     */
+    private static final double AI_STEERING_DEADZONE = 2.5;
+    private static final double AI_STEERING_GAIN = 0.38;
+    private static final double AI_LOW_SPEED_MAX_STEERING = 24.0;
+    private static final double AI_HIGH_SPEED_MAX_STEERING = 9.0;
+    private static final double AI_STEERING_SPEED_REDUCTION = 2.0;
+
+    /*
+     * Speed controller values are in approximate blocks/second.
+     * MTS axialVelocity is blocks/tick, so GTACore multiplies it by
+     * 20 for a convenient world-speed value.
+     */
+    private static final double AI_MAX_SPEED = 5.0;
+    private static final double AI_SPEED_DEADZONE = 0.30;
+
+    private static double aiTargetSpeed = 0.0;
+    private static double aiCurrentSpeed = 0.0;
+    private static double brakeCommand = 0.0;
+
+    /*
+     * Manual-transmission fallback.  Automatic MTS engines are left
+     * alone so their own transmission logic can choose gears from
+     * the vehicle pack's RPM definitions.
+     */
+    private static int transmissionTickCounter = 0;
+    private static final int TRANSMISSION_CHECK_TICKS = 8;
+    private static final double MANUAL_UPSHIFT_RPM_FRACTION = 0.82;
+    private static final double MANUAL_DOWNSHIFT_RPM_FRACTION = 0.36;
 
     private static final class HomeWaypoint {
 
@@ -480,6 +510,8 @@ public class GTACore {
                             driveReverse = false;
                             driveForward = true;
                             throttleCommand = 1.0;
+                            brakeCommand = 0.0;
+                            aiTargetSpeed = 0.0;
 
                             context.getSource()
                                 .sendSuccess(
@@ -633,6 +665,8 @@ public class GTACore {
                             driveForward = false;
                             driveReverse = true;
                             throttleCommand = 1.0;
+                            brakeCommand = 0.0;
+                            aiTargetSpeed = 0.0;
 
                             context.getSource()
                                 .sendSuccess(
@@ -978,7 +1012,9 @@ public class GTACore {
                             homeRouteIndex = -1;
                             driveForward = false;
                             driveReverse = false;
-                            throttleCommand = 1.0;
+                            throttleCommand = 0.0;
+                            brakeCommand = 1.0;
+                            aiTargetSpeed = 0.0;
                             steeringTarget = 0.0;
 
                             context.getSource()
@@ -1285,18 +1321,35 @@ public class GTACore {
 
                 if (forwardGearReady) {
 
-                    // Equivalent to brake pedal lifting.
+                    transmissionTickCounter++;
+
+                    if (
+                        transmissionTickCounter >=
+                            TRANSMISSION_CHECK_TICKS
+                    ) {
+
+                        transmissionTickCounter = 0;
+
+                        manageForwardTransmission(
+                            vehicle
+                        );
+                    }
+
                     setMTSVariable(
                         vehicle,
                         "brakeVar",
-                        0.0
+                        brakeCommand
                     );
 
-                    // Equivalent to W/gas pedal being down.
+                    /*
+                     * Never command power against the brake.
+                     */
                     setMTSVariable(
                         vehicle,
                         "throttleVar",
-                        throttleCommand
+                        brakeCommand > 0.01
+                            ? 0.0
+                            : throttleCommand
                     );
 
                 } else {
@@ -1334,6 +1387,8 @@ public class GTACore {
 
                 if (reverseGearReady) {
 
+                    brakeCommand = 0.0;
+
                     setMTSVariable(
                         vehicle,
                         "brakeVar",
@@ -1370,6 +1425,10 @@ public class GTACore {
                  * no W = throttle released +
                  * normal brake applied.
                  */
+
+                throttleCommand = 0.0;
+                brakeCommand = 1.0;
+                aiTargetSpeed = 0.0;
 
                 setMTSVariable(
                     vehicle,
@@ -1474,67 +1533,18 @@ public class GTACore {
                 dz
             );
 
-        double absoluteError =
-            Math.abs(
-                headingError
+        double targetSpeed =
+            calculateAITargetSpeed(
+                distance,
+                headingError,
+                FOLLOW_STOP_DISTANCE
             );
 
-        /*
-         * Pure forward steering.
-         *
-         * The steering command is recalculated every tick from the
-         * CURRENT heading error.  If the car drifts past the target
-         * heading, the sign flips immediately and the controller
-         * counter-steers instead of continuing a 360-degree turn.
-         */
-        steeringTarget =
-            clamp(
-                headingError *
-                    FOLLOW_STEERING_GAIN,
-                -AI_MAX_STEERING,
-                AI_MAX_STEERING
-            );
-
-        if (absoluteError >= 90.0) {
-
-            throttleCommand =
-                AI_HARD_TURN_THROTTLE;
-
-        } else if (
-            absoluteError >= 55.0
-        ) {
-
-            throttleCommand =
-                AI_MEDIUM_TURN_THROTTLE;
-
-        } else if (
-            absoluteError >= 25.0
-        ) {
-
-            throttleCommand =
-                AI_LIGHT_TURN_THROTTLE;
-
-        } else {
-
-            throttleCommand =
-                AI_STRAIGHT_THROTTLE;
-        }
-
-        /*
-         * Ease into the player rather than overshooting the stop
-         * distance.
-         */
-        if (
-            distance <
-                FOLLOW_RESUME_DISTANCE + 4.0
-        ) {
-
-            throttleCommand =
-                Math.min(
-                    throttleCommand,
-                    0.14
-                );
-        }
+        applyPrecisionAIControl(
+            vehicle,
+            headingError,
+            targetSpeed
+        );
 
         driveReverse = false;
         driveForward = true;
@@ -1734,60 +1744,34 @@ public class GTACore {
                 steeringDz
             );
 
-        double absoluteError =
-            Math.abs(
-                headingError
+        double targetSpeed =
+            calculateAITargetSpeed(
+                distance,
+                headingError,
+                HOME_STOP_DISTANCE
             );
 
         /*
-         * Forward only.  No turnaround state machine and no reverse.
-         * Counter-steering happens naturally because headingError is
-         * recalculated each tick.
+         * Final approach gets an extra-low target speed so braking
+         * can place the car near the actual home point instead of
+         * coasting through it.
          */
-        steeringTarget =
-            clamp(
-                headingError *
-                    HOME_STEERING_GAIN,
-                -AI_MAX_STEERING,
-                AI_MAX_STEERING
-            );
-
-        if (absoluteError >= 90.0) {
-
-            throttleCommand =
-                AI_HARD_TURN_THROTTLE;
-
-        } else if (
-            absoluteError >= 55.0
-        ) {
-
-            throttleCommand =
-                AI_MEDIUM_TURN_THROTTLE;
-
-        } else if (
-            absoluteError >= 25.0
-        ) {
-
-            throttleCommand =
-                AI_LIGHT_TURN_THROTTLE;
-
-        } else {
-
-            throttleCommand =
-                AI_STRAIGHT_THROTTLE;
-        }
-
         if (
             homeRouteIndex == 0 &&
             distance < 10.0
         ) {
-
-            throttleCommand =
+            targetSpeed =
                 Math.min(
-                    throttleCommand,
-                    0.13
+                    targetSpeed,
+                    1.4
                 );
         }
+
+        applyPrecisionAIControl(
+            vehicle,
+            headingError,
+            targetSpeed
+        );
 
         driveReverse = false;
         driveForward = true;
@@ -1850,6 +1834,265 @@ public class GTACore {
         }
 
         return chosen;
+    }
+
+    private static double calculateAITargetSpeed(
+        double distance,
+        double headingError,
+        double stopDistance
+    ) {
+
+        double absoluteError =
+            Math.abs(
+                headingError
+            );
+
+        /*
+         * Heading determines the safe cornering speed.
+         * The car can travel quickly only when it is substantially
+         * lined up with its target.
+         */
+        double targetSpeed;
+
+        if (absoluteError >= 120.0) {
+
+            targetSpeed = 0.9;
+
+        } else if (
+            absoluteError >= 80.0
+        ) {
+
+            targetSpeed = 1.3;
+
+        } else if (
+            absoluteError >= 50.0
+        ) {
+
+            targetSpeed = 2.0;
+
+        } else if (
+            absoluteError >= 25.0
+        ) {
+
+            targetSpeed = 3.0;
+
+        } else if (
+            absoluteError >= 10.0
+        ) {
+
+            targetSpeed = 4.0;
+
+        } else {
+
+            targetSpeed = AI_MAX_SPEED;
+        }
+
+        /*
+         * Distance controls the approach speed independently of the
+         * turn angle.
+         */
+        double remaining =
+            distance -
+            stopDistance;
+
+        if (remaining <= 2.0) {
+
+            targetSpeed =
+                Math.min(
+                    targetSpeed,
+                    0.8
+                );
+
+        } else if (
+            remaining <= 5.0
+        ) {
+
+            targetSpeed =
+                Math.min(
+                    targetSpeed,
+                    1.4
+                );
+
+        } else if (
+            remaining <= 10.0
+        ) {
+
+            targetSpeed =
+                Math.min(
+                    targetSpeed,
+                    2.2
+                );
+
+        } else if (
+            remaining <= 18.0
+        ) {
+
+            targetSpeed =
+                Math.min(
+                    targetSpeed,
+                    3.2
+                );
+        }
+
+        return targetSpeed;
+    }
+
+    private static void applyPrecisionAIControl(
+        Object vehicle,
+        double headingError,
+        double targetSpeed
+    ) throws Exception {
+
+        aiCurrentSpeed =
+            getVehicleSpeedBlocksPerSecond(
+                vehicle
+            );
+
+        aiTargetSpeed =
+            targetSpeed;
+
+        steeringTarget =
+            calculatePerfectSteeringAngle(
+                headingError,
+                aiCurrentSpeed
+            );
+
+        updateAISpeedController(
+            aiCurrentSpeed,
+            targetSpeed
+        );
+    }
+
+    private static double calculatePerfectSteeringAngle(
+        double headingError,
+        double speed
+    ) {
+
+        double absoluteError =
+            Math.abs(
+                headingError
+            );
+
+        /*
+         * This is the explicit STRAIGHT state the old controller was
+         * missing.
+         */
+        if (
+            absoluteError <=
+                AI_STEERING_DEADZONE
+        ) {
+            return 0.0;
+        }
+
+        /*
+         * Faster car = smaller maximum wheel angle.
+         * This reduces dirt-surface drifting and over-correction.
+         */
+        double speedLimitedMaximum =
+            clamp(
+                AI_LOW_SPEED_MAX_STEERING -
+                    speed *
+                    AI_STEERING_SPEED_REDUCTION,
+                AI_HIGH_SPEED_MAX_STEERING,
+                AI_LOW_SPEED_MAX_STEERING
+            );
+
+        double requested =
+            headingError *
+                AI_STEERING_GAIN;
+
+        /*
+         * Near straight, soften the steering even further so the AI
+         * settles at center rather than bouncing around it.
+         */
+        if (absoluteError < 10.0) {
+            requested *= 0.55;
+        }
+
+        return clamp(
+            requested,
+            -speedLimitedMaximum,
+            speedLimitedMaximum
+        );
+    }
+
+    private static double getVehicleSpeedBlocksPerSecond(
+        Object vehicle
+    ) throws Exception {
+
+        return Math.abs(
+            getDoubleField(
+                vehicle,
+                "axialVelocity"
+            ) *
+            20.0
+        );
+    }
+
+    private static void updateAISpeedController(
+        double currentSpeed,
+        double targetSpeed
+    ) {
+
+        double speedError =
+            targetSpeed -
+            currentSpeed;
+
+        /*
+         * Too fast: release throttle first, then proportionally apply
+         * the service brake.  This is what lets the AI actually hold
+         * a cornering/approach speed instead of only varying throttle.
+         */
+        if (
+            speedError <
+                -AI_SPEED_DEADZONE
+        ) {
+
+            throttleCommand = 0.0;
+
+            brakeCommand =
+                clamp(
+                    (-speedError) *
+                        0.18,
+                    0.08,
+                    0.70
+                );
+
+            return;
+        }
+
+        /*
+         * Too slow: release brake and proportionally add throttle.
+         */
+        if (
+            speedError >
+                AI_SPEED_DEADZONE
+        ) {
+
+            brakeCommand = 0.0;
+
+            throttleCommand =
+                clamp(
+                    0.10 +
+                        speedError *
+                        0.08,
+                    0.10,
+                    0.55
+                );
+
+            return;
+        }
+
+        /*
+         * Within the target-speed band, use only a tiny maintenance
+         * throttle.  At very low target speeds, coast instead.
+         */
+        brakeCommand = 0.0;
+
+        throttleCommand =
+            targetSpeed < 1.0
+                ? 0.0
+                : 0.08;
     }
 
     private static double getHeadingErrorToTarget(
@@ -1973,6 +2216,41 @@ public class GTACore {
         );
     }
 
+    private static double getNumericField(
+        Object owner,
+        String fieldName
+    ) throws Exception {
+
+        Field field =
+            findField(
+                owner.getClass(),
+                fieldName
+            );
+
+        if (field == null) {
+            throw new NoSuchFieldException(
+                fieldName
+            );
+        }
+
+        field.setAccessible(true);
+
+        Object value =
+            field.get(
+                owner
+            );
+
+        if (!(value instanceof Number)) {
+            throw new IllegalStateException(
+                fieldName +
+                    " is not numeric."
+            );
+        }
+
+        return ((Number) value)
+            .doubleValue();
+    }
+
     private static double clamp(
         double value,
         double minimum,
@@ -2000,9 +2278,18 @@ public class GTACore {
             steeringTarget -
             steeringCurrent;
 
+        /*
+         * Return to center faster than we add steering lock.  This
+         * helps the car straighten itself immediately after a turn.
+         */
+        double step =
+            Math.abs(steeringTarget) < 0.5
+                ? 5.0
+                : STEERING_STEP_PER_TICK;
+
         if (
             Math.abs(difference) <=
-            STEERING_STEP_PER_TICK
+            step
         ) {
 
             steeringCurrent =
@@ -2012,7 +2299,7 @@ public class GTACore {
 
             steeringCurrent +=
                 Math.copySign(
-                    STEERING_STEP_PER_TICK,
+                    step,
                     difference
                 );
         }
@@ -2430,6 +2717,100 @@ public class GTACore {
         return allForward;
     }
 
+    private static void manageForwardTransmission(
+        Object vehicle
+    ) {
+
+        try {
+
+            List<?> engines =
+                getEngines(vehicle);
+
+            for (Object engine : engines) {
+
+                double gear =
+                    getMTSVariableValue(
+                        engine,
+                        "currentGearVar"
+                    );
+
+                if (gear < 1.0) {
+                    continue;
+                }
+
+                /*
+                 * Automatic engines already have MTS's native
+                 * RPM-based shifting.  Do not fight that system.
+                 */
+                double automatic =
+                    getMTSVariableValue(
+                        engine,
+                        "isAutomaticVar"
+                    );
+
+                if (automatic > 0.5) {
+                    continue;
+                }
+
+                double rpm =
+                    getNumericField(
+                        engine,
+                        "rpm"
+                    );
+
+                double maxSafeRPM =
+                    getMTSVariableValue(
+                        engine,
+                        "maxSafeRPMVar"
+                    );
+
+                int forwardGears =
+                    (int) getNumericField(
+                        engine,
+                        "forwardsGears"
+                    );
+
+                if (
+                    gear < forwardGears &&
+                    rpm >
+                        maxSafeRPM *
+                        MANUAL_UPSHIFT_RPM_FRACTION
+                ) {
+
+                    invokeNoArg(
+                        engine,
+                        "shiftUp"
+                    );
+
+                } else if (
+                    gear > 1.0 &&
+                    rpm <
+                        maxSafeRPM *
+                        MANUAL_DOWNSHIFT_RPM_FRACTION
+                ) {
+
+                    invokeNoArg(
+                        engine,
+                        "shiftDown"
+                    );
+                }
+            }
+
+        } catch (Exception e) {
+
+            /*
+             * Transmission tuning is an enhancement, not something
+             * that should disable steering/throttle if a particular
+             * MTS version exposes a field differently.  In that case
+             * MTS keeps handling the current gear itself.
+             */
+            System.err.println(
+                "[GTACore] Transmission manager fallback: "
+                    + e.getMessage()
+            );
+        }
+    }
+
     private static boolean ensureReverseGear(
         Object vehicle
     ) throws Exception {
@@ -2632,8 +3013,21 @@ public class GTACore {
 
         source.sendSuccess(
             () -> Component.literal(
+                String.format(
+                    "AI speed: %.2f / target %.2f blocks/s",
+                    aiCurrentSpeed,
+                    aiTargetSpeed
+                )
+            ),
+            false
+        );
+
+        source.sendSuccess(
+            () -> Component.literal(
                 "Throttle request: "
                     + throttle
+                    + " | AI brake request: "
+                    + brakeCommand
             ),
             false
         );
