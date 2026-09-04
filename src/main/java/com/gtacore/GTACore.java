@@ -70,10 +70,24 @@ public class GTACore {
     private static int homeTrailTickCounter = 0;
     private static int homeRouteIndex = -1;
 
+    /*
+     * A return route starts with the previous breadcrumb behind the
+     * car.  If we always command forward, the car has to attempt a
+     * huge U-turn.  Instead, use a short reversing turn until the
+     * nose is reasonably aligned with the route, then shift back
+     * into forward.
+     *
+     * The two thresholds provide hysteresis so the controller does
+     * not bounce rapidly between forward and reverse.
+     */
+    private static boolean homeTurnaroundReverse = false;
+
     private static final double HOME_STOP_DISTANCE = 3.0;
     private static final double HOME_WAYPOINT_SPACING = 5.0;
     private static final double HOME_WAYPOINT_REACHED = 4.0;
     private static final double HOME_STEERING_GAIN = 0.65;
+    private static final double HOME_REVERSE_ENTER_ANGLE = 105.0;
+    private static final double HOME_REVERSE_EXIT_ANGLE = 55.0;
 
     private static final class HomeWaypoint {
 
@@ -261,6 +275,7 @@ public class GTACore {
                             driveForward = false;
                             driveReverse = false;
                             returningHome = false;
+                            homeTurnaroundReverse = false;
                             throttleCommand = 1.0;
                             steeringTarget = 0.0;
                             steeringCurrent = 0.0;
@@ -571,6 +586,7 @@ public class GTACore {
                                     .toString();
                             homeSet = true;
                             returningHome = false;
+                            homeTurnaroundReverse = false;
                             homeRouteIndex = -1;
 
                             homeTrail.clear();
@@ -694,6 +710,7 @@ public class GTACore {
                                         homeTrail.size() - 2
                                     );
 
+                                homeTurnaroundReverse = false;
                                 driveReverse = false;
                                 driveForward = true;
                                 throttleCommand = 0.25;
@@ -732,6 +749,7 @@ public class GTACore {
                         .executes(context -> {
 
                             returningHome = false;
+                            homeTurnaroundReverse = false;
                             homeRouteIndex = -1;
                             driveForward = false;
                             driveReverse = false;
@@ -760,6 +778,7 @@ public class GTACore {
                         .executes(context -> {
 
                             returningHome = false;
+                            homeTurnaroundReverse = false;
                             homeRouteIndex = -1;
                             driveForward = false;
                             driveReverse = false;
@@ -1296,6 +1315,7 @@ public class GTACore {
         ) {
 
             returningHome = false;
+            homeTurnaroundReverse = false;
             driveForward = false;
             driveReverse = false;
             throttleCommand = 1.0;
@@ -1329,7 +1349,33 @@ public class GTACore {
                 dz
             );
 
-        steeringTarget =
+        double absoluteError =
+            Math.abs(
+                headingError
+            );
+
+        /*
+         * The first breadcrumb on the return trip is normally
+         * behind the vehicle.  Forward-only control forces a giant
+         * U-turn.  Reverse-turn briefly instead.
+         */
+        if (
+            !homeTurnaroundReverse &&
+            absoluteError >=
+                HOME_REVERSE_ENTER_ANGLE
+        ) {
+            homeTurnaroundReverse = true;
+        }
+
+        if (
+            homeTurnaroundReverse &&
+            absoluteError <=
+                HOME_REVERSE_EXIT_ANGLE
+        ) {
+            homeTurnaroundReverse = false;
+        }
+
+        double requestedSteering =
             clamp(
                 headingError *
                     HOME_STEERING_GAIN,
@@ -1337,16 +1383,29 @@ public class GTACore {
                 MAX_STEERING_INPUT
             );
 
-        /*
-         * Turn slowly when a waypoint is far off the nose.
-         * This reduces the wide circles and overshoot behavior of
-         * the original direct-home controller.
-         */
-        double absoluteError =
-            Math.abs(
-                headingError
-            );
+        if (homeTurnaroundReverse) {
 
+            /*
+             * Reversing flips the effect of steering on the car's
+             * heading, so invert the wheel command while backing.
+             */
+            steeringTarget =
+                -requestedSteering;
+
+            throttleCommand = 0.14;
+            driveForward = false;
+            driveReverse = true;
+
+            return;
+        }
+
+        steeringTarget =
+            requestedSteering;
+
+        /*
+         * Once the nose is pointed generally along the route, use
+         * normal forward driving with conservative throttle.
+         */
         if (absoluteError > 75.0) {
 
             throttleCommand = 0.10;
@@ -2017,6 +2076,8 @@ public class GTACore {
             () -> Component.literal(
                 "Returning home: "
                     + returningHome
+                    + " | turnaround reverse: "
+                    + homeTurnaroundReverse
             ),
             false
         );
