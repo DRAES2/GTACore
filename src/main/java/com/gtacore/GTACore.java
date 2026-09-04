@@ -80,14 +80,31 @@ public class GTACore {
      * The two thresholds provide hysteresis so the controller does
      * not bounce rapidly between forward and reverse.
      */
-    private static boolean homeTurnaroundReverse = false;
+    private static final int HOME_TURN_FOLLOW = 0;
+    private static final int HOME_TURN_REVERSE = 1;
+    private static final int HOME_TURN_FORWARD = 2;
+
+    private static int homeTurnPhase =
+        HOME_TURN_FOLLOW;
+
+    /*
+     * Direction is latched for the whole turnaround.
+     * +1 means turn the nose right, -1 means left.
+     *
+     * This prevents the previous controller from changing its mind
+     * every time the target crossed from one side of the car to the
+     * other while reversing.
+     */
+    private static double homeTurnDirection = 1.0;
 
     private static final double HOME_STOP_DISTANCE = 3.0;
     private static final double HOME_WAYPOINT_SPACING = 5.0;
     private static final double HOME_WAYPOINT_REACHED = 4.0;
+    private static final double HOME_LOOKAHEAD_DISTANCE = 14.0;
     private static final double HOME_STEERING_GAIN = 0.65;
-    private static final double HOME_REVERSE_ENTER_ANGLE = 105.0;
-    private static final double HOME_REVERSE_EXIT_ANGLE = 55.0;
+    private static final double HOME_TURN_START_ANGLE = 100.0;
+    private static final double HOME_REVERSE_TO_FORWARD_ANGLE = 105.0;
+    private static final double HOME_TURN_FINISH_ANGLE = 22.0;
 
     private static final class HomeWaypoint {
 
@@ -275,7 +292,8 @@ public class GTACore {
                             driveForward = false;
                             driveReverse = false;
                             returningHome = false;
-                            homeTurnaroundReverse = false;
+                            homeTurnPhase = HOME_TURN_FOLLOW;
+            homeTurnDirection = 1.0;
                             throttleCommand = 1.0;
                             steeringTarget = 0.0;
                             steeringCurrent = 0.0;
@@ -586,7 +604,8 @@ public class GTACore {
                                     .toString();
                             homeSet = true;
                             returningHome = false;
-                            homeTurnaroundReverse = false;
+                            homeTurnPhase = HOME_TURN_FOLLOW;
+            homeTurnDirection = 1.0;
                             homeRouteIndex = -1;
 
                             homeTrail.clear();
@@ -710,7 +729,8 @@ public class GTACore {
                                         homeTrail.size() - 2
                                     );
 
-                                homeTurnaroundReverse = false;
+                                homeTurnPhase = HOME_TURN_FOLLOW;
+            homeTurnDirection = 1.0;
                                 driveReverse = false;
                                 driveForward = true;
                                 throttleCommand = 0.25;
@@ -749,7 +769,8 @@ public class GTACore {
                         .executes(context -> {
 
                             returningHome = false;
-                            homeTurnaroundReverse = false;
+                            homeTurnPhase = HOME_TURN_FOLLOW;
+            homeTurnDirection = 1.0;
                             homeRouteIndex = -1;
                             driveForward = false;
                             driveReverse = false;
@@ -778,7 +799,8 @@ public class GTACore {
                         .executes(context -> {
 
                             returningHome = false;
-                            homeTurnaroundReverse = false;
+                            homeTurnPhase = HOME_TURN_FOLLOW;
+            homeTurnDirection = 1.0;
                             homeRouteIndex = -1;
                             driveForward = false;
                             driveReverse = false;
@@ -1315,7 +1337,8 @@ public class GTACore {
         ) {
 
             returningHome = false;
-            homeTurnaroundReverse = false;
+            homeTurnPhase = HOME_TURN_FOLLOW;
+            homeTurnDirection = 1.0;
             driveForward = false;
             driveReverse = false;
             throttleCommand = 1.0;
@@ -1342,11 +1365,30 @@ public class GTACore {
             return;
         }
 
+        /*
+         * Pure-pursuit style look-ahead:
+         * do not aim at every breadcrumb individually.  Pick a point
+         * farther down the recorded route so the car chooses one
+         * smooth arc instead of zig-zagging point-to-point.
+         */
+        HomeWaypoint steeringTargetPoint =
+            chooseHomeLookahead(
+                wrapper
+            );
+
+        double steeringDx =
+            steeringTargetPoint.x -
+            wrapper.getX();
+
+        double steeringDz =
+            steeringTargetPoint.z -
+            wrapper.getZ();
+
         double headingError =
             getHeadingErrorToTarget(
                 vehicle,
-                dx,
-                dz
+                steeringDx,
+                steeringDz
             );
 
         double absoluteError =
@@ -1355,27 +1397,96 @@ public class GTACore {
             );
 
         /*
-         * The first breadcrumb on the return trip is normally
-         * behind the vehicle.  Forward-only control forces a giant
-         * U-turn.  Reverse-turn briefly instead.
+         * Begin ONE deliberate turnaround if the return route starts
+         * mostly behind the vehicle.
          */
         if (
-            !homeTurnaroundReverse &&
+            homeTurnPhase ==
+                HOME_TURN_FOLLOW &&
             absoluteError >=
-                HOME_REVERSE_ENTER_ANGLE
+                HOME_TURN_START_ANGLE
         ) {
-            homeTurnaroundReverse = true;
+
+            homeTurnPhase =
+                HOME_TURN_REVERSE;
+
+            /*
+             * At almost exactly 180 degrees, left/right is
+             * mathematically ambiguous.  Pick right consistently.
+             */
+            homeTurnDirection =
+                Math.abs(headingError) > 175.0
+                    ? 1.0
+                    : Math.copySign(
+                        1.0,
+                        headingError
+                    );
         }
 
         if (
-            homeTurnaroundReverse &&
-            absoluteError <=
-                HOME_REVERSE_EXIT_ANGLE
+            homeTurnPhase ==
+                HOME_TURN_REVERSE
         ) {
-            homeTurnaroundReverse = false;
+
+            /*
+             * Back up while steering opposite the desired nose
+             * rotation.  Because the turn direction is latched, this
+             * cannot oscillate left/right like the previous version.
+             */
+            steeringTarget =
+                -homeTurnDirection *
+                MAX_STEERING_INPUT;
+
+            throttleCommand = 0.13;
+            driveForward = false;
+            driveReverse = true;
+
+            if (
+                absoluteError <=
+                    HOME_REVERSE_TO_FORWARD_ANGLE
+            ) {
+
+                homeTurnPhase =
+                    HOME_TURN_FORWARD;
+            }
+
+            return;
         }
 
-        double requestedSteering =
+        if (
+            homeTurnPhase ==
+                HOME_TURN_FORWARD
+        ) {
+
+            /*
+             * Now complete the same turn going forward.  The MTS
+             * transmission bridge automatically passes through
+             * neutral before selecting first gear.
+             */
+            steeringTarget =
+                homeTurnDirection *
+                MAX_STEERING_INPUT;
+
+            throttleCommand = 0.16;
+            driveReverse = false;
+            driveForward = true;
+
+            if (
+                absoluteError <=
+                    HOME_TURN_FINISH_ANGLE
+            ) {
+
+                homeTurnPhase =
+                    HOME_TURN_FOLLOW;
+            }
+
+            return;
+        }
+
+        /*
+         * Normal route following after the nose is aligned.
+         */
+        steeringTarget =
             clamp(
                 headingError *
                     HOME_STEERING_GAIN,
@@ -1383,48 +1494,25 @@ public class GTACore {
                 MAX_STEERING_INPUT
             );
 
-        if (homeTurnaroundReverse) {
+        if (absoluteError > 65.0) {
 
-            /*
-             * Reversing flips the effect of steering on the car's
-             * heading, so invert the wheel command while backing.
-             */
-            steeringTarget =
-                -requestedSteering;
-
-            throttleCommand = 0.14;
-            driveForward = false;
-            driveReverse = true;
-
-            return;
-        }
-
-        steeringTarget =
-            requestedSteering;
-
-        /*
-         * Once the nose is pointed generally along the route, use
-         * normal forward driving with conservative throttle.
-         */
-        if (absoluteError > 75.0) {
-
-            throttleCommand = 0.10;
+            throttleCommand = 0.12;
 
         } else if (
-            absoluteError > 40.0
+            absoluteError > 35.0
         ) {
 
-            throttleCommand = 0.16;
+            throttleCommand = 0.18;
 
         } else if (
-            absoluteError > 20.0
+            absoluteError > 18.0
         ) {
 
-            throttleCommand = 0.22;
+            throttleCommand = 0.24;
 
         } else {
 
-            throttleCommand = 0.30;
+            throttleCommand = 0.32;
         }
 
         if (
@@ -1441,6 +1529,65 @@ public class GTACore {
 
         driveReverse = false;
         driveForward = true;
+    }
+
+    private static HomeWaypoint chooseHomeLookahead(
+        Entity wrapper
+    ) {
+
+        int index =
+            Math.max(
+                0,
+                Math.min(
+                    homeRouteIndex,
+                    homeTrail.size() - 1
+                )
+            );
+
+        HomeWaypoint chosen =
+            homeTrail.get(index);
+
+        /*
+         * Walk farther toward home until we have roughly the desired
+         * look-ahead distance.  This is the "path choice" layer that
+         * was missing before: steering is based on the route shape,
+         * not only the single breadcrumb directly behind the car.
+         */
+        for (
+            int candidateIndex =
+                index - 1;
+            candidateIndex >= 0;
+            candidateIndex--
+        ) {
+
+            HomeWaypoint candidate =
+                homeTrail.get(
+                    candidateIndex
+                );
+
+            double dx =
+                candidate.x -
+                wrapper.getX();
+
+            double dz =
+                candidate.z -
+                wrapper.getZ();
+
+            chosen = candidate;
+
+            if (
+                Math.sqrt(
+                    dx * dx +
+                    dz * dz
+                ) >=
+                    HOME_LOOKAHEAD_DISTANCE
+            ) {
+
+                break;
+            }
+        }
+
+        return chosen;
     }
 
     private static double getHeadingErrorToTarget(
@@ -2076,8 +2223,8 @@ public class GTACore {
             () -> Component.literal(
                 "Returning home: "
                     + returningHome
-                    + " | turnaround reverse: "
-                    + homeTurnaroundReverse
+                    + " | turn phase: "
+                    + homeTurnPhase
             ),
             false
         );
