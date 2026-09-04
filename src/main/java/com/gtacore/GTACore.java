@@ -105,6 +105,35 @@ public class GTACore {
     private static final double HOME_TURN_START_ANGLE = 100.0;
     private static final double HOME_REVERSE_TO_FORWARD_ANGLE = 105.0;
     private static final double HOME_TURN_FINISH_ANGLE = 22.0;
+    private static final double HOME_TURN_STEERING = 30.0;
+
+    // ============================================================
+    // FOLLOW SYSTEM
+    // ============================================================
+
+    /*
+     * /gta follow makes the selected car follow the player who
+     * issued the command.  This is the first moving-target version
+     * of the driver AI.
+     */
+    private static UUID followTargetId = null;
+
+    private static final int FOLLOW_TURN_FOLLOW = 0;
+    private static final int FOLLOW_TURN_REVERSE = 1;
+    private static final int FOLLOW_TURN_FORWARD = 2;
+
+    private static int followTurnPhase =
+        FOLLOW_TURN_FOLLOW;
+
+    private static double followTurnDirection = 1.0;
+
+    private static final double FOLLOW_STOP_DISTANCE = 7.0;
+    private static final double FOLLOW_RESUME_DISTANCE = 9.5;
+    private static final double FOLLOW_TURN_START_ANGLE = 105.0;
+    private static final double FOLLOW_REVERSE_TO_FORWARD_ANGLE = 100.0;
+    private static final double FOLLOW_TURN_FINISH_ANGLE = 24.0;
+    private static final double FOLLOW_STEERING_GAIN = 0.60;
+    private static final double FOLLOW_TURN_STEERING = 28.0;
 
     private static final class HomeWaypoint {
 
@@ -292,8 +321,11 @@ public class GTACore {
                             driveForward = false;
                             driveReverse = false;
                             returningHome = false;
+                            followTargetId = null;
+                            followTurnPhase = FOLLOW_TURN_FOLLOW;
+                            followTurnDirection = 1.0;
                             homeTurnPhase = HOME_TURN_FOLLOW;
-            homeTurnDirection = 1.0;
+                            homeTurnDirection = 1.0;
                             throttleCommand = 1.0;
                             steeringTarget = 0.0;
                             steeringCurrent = 0.0;
@@ -405,6 +437,10 @@ public class GTACore {
                             }
 
                             returningHome = false;
+                            followTargetId = null;
+                            requestAutoStart(
+                                context.getSource().getServer()
+                            );
                             driveReverse = false;
                             driveForward = true;
                             throttleCommand = 1.0;
@@ -446,6 +482,10 @@ public class GTACore {
                             }
 
                             returningHome = false;
+                            followTargetId = null;
+                            requestAutoStart(
+                                context.getSource().getServer()
+                            );
                             steeringTarget =
                                 -MAX_STEERING_INPUT;
 
@@ -476,6 +516,10 @@ public class GTACore {
                             }
 
                             returningHome = false;
+                            followTargetId = null;
+                            requestAutoStart(
+                                context.getSource().getServer()
+                            );
                             steeringTarget =
                                 MAX_STEERING_INPUT;
 
@@ -506,6 +550,10 @@ public class GTACore {
                             }
 
                             returningHome = false;
+                            followTargetId = null;
+                            requestAutoStart(
+                                context.getSource().getServer()
+                            );
                             steeringTarget = 0.0;
 
                             context.getSource()
@@ -542,6 +590,10 @@ public class GTACore {
                             }
 
                             returningHome = false;
+                            followTargetId = null;
+                            requestAutoStart(
+                                context.getSource().getServer()
+                            );
                             driveForward = false;
                             driveReverse = true;
                             throttleCommand = 1.0;
@@ -605,7 +657,7 @@ public class GTACore {
                             homeSet = true;
                             returningHome = false;
                             homeTurnPhase = HOME_TURN_FOLLOW;
-            homeTurnDirection = 1.0;
+                            homeTurnDirection = 1.0;
                             homeRouteIndex = -1;
 
                             homeTrail.clear();
@@ -716,7 +768,8 @@ public class GTACore {
                                     true
                                 );
 
-                                startVehicle(vehicle);
+                                followTargetId = null;
+                                requestAutoStart(server);
 
                                 /*
                                  * The final breadcrumb is the car's
@@ -730,7 +783,7 @@ public class GTACore {
                                     );
 
                                 homeTurnPhase = HOME_TURN_FOLLOW;
-            homeTurnDirection = 1.0;
+                            homeTurnDirection = 1.0;
                                 driveReverse = false;
                                 driveForward = true;
                                 throttleCommand = 0.25;
@@ -770,7 +823,7 @@ public class GTACore {
 
                             returningHome = false;
                             homeTurnPhase = HOME_TURN_FOLLOW;
-            homeTurnDirection = 1.0;
+                            homeTurnDirection = 1.0;
                             homeRouteIndex = -1;
                             driveForward = false;
                             driveReverse = false;
@@ -790,6 +843,85 @@ public class GTACore {
                 )
 
                 // ------------------------------------------------
+                // /gta follow
+                //
+                // Makes the selected car autonomously follow the
+                // player who issued the command.
+                // ------------------------------------------------
+                .then(
+                    Commands.literal("follow")
+                        .executes(context -> {
+
+                            if (selectedCar == null) {
+                                context.getSource()
+                                    .sendFailure(
+                                        Component.literal(
+                                            "Select a car first."
+                                        )
+                                    );
+                                return 0;
+                            }
+
+                            ServerPlayer target =
+                                context.getSource()
+                                    .getPlayerOrException();
+
+                            returningHome = false;
+                            homeTurnPhase = HOME_TURN_FOLLOW;
+                            homeTurnDirection = 1.0;
+                            homeRouteIndex = -1;
+
+                            followTargetId =
+                                target.getUUID();
+
+                            followTurnPhase =
+                                FOLLOW_TURN_FOLLOW;
+
+                            followTurnDirection = 1.0;
+
+                            requestAutoStart(
+                                context.getSource().getServer()
+                            );
+
+                            context.getSource()
+                                .sendSuccess(
+                                    () -> Component.literal(
+                                        "Selected car is now following you."
+                                    ),
+                                    false
+                                );
+
+                            return Command.SINGLE_SUCCESS;
+                        })
+                )
+
+                .then(
+                    Commands.literal("unfollow")
+                        .executes(context -> {
+
+                            followTargetId = null;
+                            followTurnPhase =
+                                FOLLOW_TURN_FOLLOW;
+                            followTurnDirection = 1.0;
+
+                            driveForward = false;
+                            driveReverse = false;
+                            throttleCommand = 1.0;
+                            steeringTarget = 0.0;
+
+                            context.getSource()
+                                .sendSuccess(
+                                    () -> Component.literal(
+                                        "Follow cancelled."
+                                    ),
+                                    false
+                                );
+
+                            return Command.SINGLE_SUCCESS;
+                        })
+                )
+
+                // ------------------------------------------------
                 // /gta stop
                 //
                 // Release W and apply the normal brake.
@@ -800,7 +932,7 @@ public class GTACore {
 
                             returningHome = false;
                             homeTurnPhase = HOME_TURN_FOLLOW;
-            homeTurnDirection = 1.0;
+                            homeTurnDirection = 1.0;
                             homeRouteIndex = -1;
                             driveForward = false;
                             driveReverse = false;
@@ -1055,10 +1187,32 @@ public class GTACore {
                 }
             }
 
-            if (returningHome) {
+            if (followTargetId != null) {
+
+                updateFollowNavigation(
+                    event.getServer(),
+                    vehicle,
+                    wrapper
+                );
+
+            } else if (returningHome) {
+
                 updateHomeNavigation(
                     vehicle,
                     wrapper
+                );
+            }
+
+            /*
+             * Any driving action automatically requests engine
+             * startup if the car is currently off.
+             */
+            if (
+                driveForward ||
+                driveReverse
+            ) {
+                ensureVehicleStarted(
+                    vehicle
                 );
             }
 
@@ -1193,6 +1347,7 @@ public class GTACore {
             driveForward = false;
             driveReverse = false;
             returningHome = false;
+            followTargetId = null;
 
             System.err.println(
                 "[GTACore] Vehicle control failed:"
@@ -1200,6 +1355,233 @@ public class GTACore {
 
             e.printStackTrace();
         }
+    }
+
+    // ============================================================
+    // FOLLOW NAVIGATION
+    // ============================================================
+
+    private static void updateFollowNavigation(
+        MinecraftServer server,
+        Object vehicle,
+        Entity wrapper
+    ) throws Exception {
+
+        ServerPlayer target =
+            server.getPlayerList()
+                .getPlayer(
+                    followTargetId
+                );
+
+        if (target == null) {
+
+            followTargetId = null;
+            followTurnPhase =
+                FOLLOW_TURN_FOLLOW;
+
+            driveForward = false;
+            driveReverse = false;
+            steeringTarget = 0.0;
+
+            return;
+        }
+
+        if (
+            target.level().dimension() !=
+            wrapper.level().dimension()
+        ) {
+
+            driveForward = false;
+            driveReverse = false;
+            steeringTarget = 0.0;
+
+            return;
+        }
+
+        double dx =
+            target.getX() -
+            wrapper.getX();
+
+        double dz =
+            target.getZ() -
+            wrapper.getZ();
+
+        double distance =
+            Math.sqrt(
+                dx * dx +
+                dz * dz
+            );
+
+        /*
+         * Maintain a gap rather than trying to occupy the player's
+         * exact block.
+         */
+        if (
+            distance <=
+                FOLLOW_STOP_DISTANCE
+        ) {
+
+            followTurnPhase =
+                FOLLOW_TURN_FOLLOW;
+
+            driveForward = false;
+            driveReverse = false;
+            throttleCommand = 1.0;
+            steeringTarget = 0.0;
+
+            return;
+        }
+
+        double headingError =
+            getHeadingErrorToTarget(
+                vehicle,
+                dx,
+                dz
+            );
+
+        double absoluteError =
+            Math.abs(
+                headingError
+            );
+
+        if (
+            followTurnPhase ==
+                FOLLOW_TURN_FOLLOW &&
+            absoluteError >=
+                FOLLOW_TURN_START_ANGLE
+        ) {
+
+            followTurnPhase =
+                FOLLOW_TURN_REVERSE;
+
+            followTurnDirection =
+                Math.abs(headingError) > 175.0
+                    ? 1.0
+                    : Math.copySign(
+                        1.0,
+                        headingError
+                    );
+        }
+
+        if (
+            followTurnPhase ==
+                FOLLOW_TURN_REVERSE
+        ) {
+
+            steeringTarget =
+                -followTurnDirection *
+                FOLLOW_TURN_STEERING;
+
+            throttleCommand = 0.11;
+            driveForward = false;
+            driveReverse = true;
+
+            if (
+                absoluteError <=
+                    FOLLOW_REVERSE_TO_FORWARD_ANGLE
+            ) {
+
+                followTurnPhase =
+                    FOLLOW_TURN_FORWARD;
+            }
+
+            return;
+        }
+
+        if (
+            followTurnPhase ==
+                FOLLOW_TURN_FORWARD
+        ) {
+
+            boolean crossedTargetHeading =
+                Math.signum(
+                    headingError
+                ) !=
+                Math.signum(
+                    followTurnDirection
+                );
+
+            if (
+                absoluteError <=
+                    FOLLOW_TURN_FINISH_ANGLE ||
+                crossedTargetHeading
+            ) {
+
+                followTurnPhase =
+                    FOLLOW_TURN_FOLLOW;
+
+                steeringTarget =
+                    clamp(
+                        headingError *
+                            FOLLOW_STEERING_GAIN,
+                        -FOLLOW_TURN_STEERING,
+                        FOLLOW_TURN_STEERING
+                    );
+
+                throttleCommand = 0.10;
+                driveReverse = false;
+                driveForward = true;
+
+                return;
+            }
+
+            steeringTarget =
+                followTurnDirection *
+                FOLLOW_TURN_STEERING;
+
+            throttleCommand = 0.11;
+            driveReverse = false;
+            driveForward = true;
+
+            return;
+        }
+
+        steeringTarget =
+            clamp(
+                headingError *
+                    FOLLOW_STEERING_GAIN,
+                -FOLLOW_TURN_STEERING,
+                FOLLOW_TURN_STEERING
+            );
+
+        /*
+         * Slow down when correcting a large angle and when getting
+         * close to the player.  This matters a lot on dirt where a
+         * full-lock turn at speed causes the MTS car to slide.
+         */
+        if (absoluteError > 55.0) {
+
+            throttleCommand = 0.11;
+
+        } else if (
+            absoluteError > 30.0
+        ) {
+
+            throttleCommand = 0.17;
+
+        } else if (
+            distance < 14.0
+        ) {
+
+            throttleCommand = 0.16;
+
+        } else {
+
+            throttleCommand = 0.30;
+        }
+
+        if (
+            distance < FOLLOW_RESUME_DISTANCE
+        ) {
+            throttleCommand =
+                Math.min(
+                    throttleCommand,
+                    0.13
+                );
+        }
+
+        driveReverse = false;
+        driveForward = true;
     }
 
     // ============================================================
@@ -1435,7 +1817,7 @@ public class GTACore {
              */
             steeringTarget =
                 -homeTurnDirection *
-                MAX_STEERING_INPUT;
+                HOME_TURN_STEERING;
 
             throttleCommand = 0.13;
             driveForward = false;
@@ -1459,26 +1841,55 @@ public class GTACore {
         ) {
 
             /*
-             * Now complete the same turn going forward.  The MTS
-             * transmission bridge automatically passes through
-             * neutral before selecting first gear.
+             * Complete the turn going forward, but DO NOT keep
+             * holding the original steering direction after the
+             * nose crosses the desired path.
+             *
+             * On low-grip surfaces the old version would drift past
+             * the target heading, keep steering right, and perform a
+             * full 360-degree circle.  As soon as the heading error
+             * changes sign, hand control back to the proportional
+             * route follower so it can counter-steer.
              */
-            steeringTarget =
-                homeTurnDirection *
-                MAX_STEERING_INPUT;
-
-            throttleCommand = 0.16;
-            driveReverse = false;
-            driveForward = true;
+            boolean crossedTargetHeading =
+                Math.signum(
+                    headingError
+                ) !=
+                Math.signum(
+                    homeTurnDirection
+                );
 
             if (
                 absoluteError <=
-                    HOME_TURN_FINISH_ANGLE
+                    HOME_TURN_FINISH_ANGLE ||
+                crossedTargetHeading
             ) {
 
                 homeTurnPhase =
                     HOME_TURN_FOLLOW;
+
+                steeringTarget =
+                    clamp(
+                        headingError *
+                            HOME_STEERING_GAIN,
+                        -HOME_TURN_STEERING,
+                        HOME_TURN_STEERING
+                    );
+
+                throttleCommand = 0.10;
+                driveReverse = false;
+                driveForward = true;
+
+                return;
             }
+
+            steeringTarget =
+                homeTurnDirection *
+                HOME_TURN_STEERING;
+
+            throttleCommand = 0.11;
+            driveReverse = false;
+            driveForward = true;
 
             return;
         }
@@ -1490,8 +1901,8 @@ public class GTACore {
             clamp(
                 headingError *
                     HOME_STEERING_GAIN,
-                -MAX_STEERING_INPUT,
-                MAX_STEERING_INPUT
+                -HOME_TURN_STEERING,
+                HOME_TURN_STEERING
             );
 
         if (absoluteError > 65.0) {
@@ -1939,6 +2350,101 @@ public class GTACore {
         return null;
     }
 
+    private static void requestAutoStart(
+        MinecraftServer server
+    ) {
+
+        try {
+
+            Object vehicle =
+                getSelectedVehicle(
+                    server
+                );
+
+            if (vehicle != null) {
+                ensureVehicleStarted(
+                    vehicle
+                );
+            }
+
+        } catch (Exception e) {
+
+            System.err.println(
+                "[GTACore] Automatic vehicle startup failed:"
+            );
+
+            e.printStackTrace();
+        }
+    }
+
+    private static void ensureVehicleStarted(
+        Object vehicle
+    ) throws Exception {
+
+        boolean running =
+            getBooleanField(
+                vehicle,
+                "enginesRunning"
+            );
+
+        boolean starting =
+            getBooleanField(
+                vehicle,
+                "enginesStarting"
+            );
+
+        if (
+            running ||
+            starting
+        ) {
+            return;
+        }
+
+        setMTSVariable(
+            vehicle,
+            "throttleVar",
+            0.0
+        );
+
+        setMTSVariable(
+            vehicle,
+            "brakeVar",
+            1.0
+        );
+
+        setMTSVariable(
+            vehicle,
+            "parkingBrakeVar",
+            0.0
+        );
+
+        List<?> engines =
+            getEngines(vehicle);
+
+        if (engines.isEmpty()) {
+            throw new IllegalStateException(
+                "This MTS vehicle has no engines."
+            );
+        }
+
+        for (Object engine : engines) {
+
+            invokeNoArg(
+                engine,
+                "shiftNeutral"
+            );
+
+            invokeNoArg(
+                engine,
+                "autoStartEngine"
+            );
+        }
+
+        System.out.println(
+            "[GTACore] Automatic engine start requested."
+        );
+    }
+
     // ============================================================
     // STARTUP
     // ============================================================
@@ -2225,6 +2731,16 @@ public class GTACore {
                     + returningHome
                     + " | turn phase: "
                     + homeTurnPhase
+            ),
+            false
+        );
+
+        source.sendSuccess(
+            () -> Component.literal(
+                "Following: "
+                    + (followTargetId != null)
+                    + " | follow turn phase: "
+                    + followTurnPhase
             ),
             false
         );
