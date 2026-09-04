@@ -3062,6 +3062,19 @@ public class GTACore {
                 "shiftNeutral"
             );
 
+            /*
+             * MTS's normal player-start path sends state changes to
+             * clients.  Calling autoStartEngine() directly on the
+             * server starts the mechanics, but the client can miss
+             * the magneto/starter animation state.
+             *
+             * Sync those visible start variables first, then engage
+             * MTS's real auto-starter logic.
+             */
+            syncEngineStartState(
+                engine
+            );
+
             invokeNoArg(
                 engine,
                 "autoStartEngine"
@@ -3069,8 +3082,60 @@ public class GTACore {
         }
 
         System.out.println(
-            "[GTACore] Automatic engine start requested."
+            "[GTACore] Automatic engine start requested + synced."
         );
+    }
+
+    private static void syncEngineStartState(
+        Object engine
+    ) throws Exception {
+
+        /*
+         * Magneto is part of the visible/running engine state for
+         * every MTS engine type.
+         */
+        setMTSVariable(
+            engine,
+            "magnetoVar",
+            1.0
+        );
+
+        /*
+         * Only normal combustion engines use the electric starter
+         * animation/state.  Electric/magic/etc. engines should not be
+         * forced into a combustion-starter animation.
+         */
+        Object definition =
+            getFieldValue(
+                engine,
+                "definition"
+            );
+
+        Object engineDefinition =
+            getFieldValue(
+                definition,
+                "engine"
+            );
+
+        Object engineType =
+            getFieldValue(
+                engineDefinition,
+                "type"
+            );
+
+        if (
+            engineType != null &&
+            "NORMAL".equalsIgnoreCase(
+                engineType.toString()
+            )
+        ) {
+
+            setMTSVariable(
+                engine,
+                "electricStarterVar",
+                1.0
+            );
+        }
     }
 
     // ============================================================
@@ -3123,20 +3188,15 @@ public class GTACore {
 
         for (Object engine : engines) {
 
-            /*
-             * This is MTS's actual public transmission
-             * method, rather than faking the gear value.
-             */
             invokeNoArg(
                 engine,
                 "shiftNeutral"
             );
 
-            /*
-             * This is MTS's actual auto-starter.
-             *
-             * It handles magneto/starter/fuel checks.
-             */
+            syncEngineStartState(
+                engine
+            );
+
             invokeNoArg(
                 engine,
                 "autoStartEngine"
@@ -3144,7 +3204,7 @@ public class GTACore {
         }
 
         System.out.println(
-            "[GTACore] MTS startup sequence requested."
+            "[GTACore] MTS startup sequence requested + synced."
         );
     }
 
@@ -3428,6 +3488,42 @@ public class GTACore {
             ),
             false
         );
+
+        if (!engines.isEmpty()) {
+
+            Object firstEngine =
+                engines.get(0);
+
+            double magneto =
+                getMTSVariableValue(
+                    firstEngine,
+                    "magnetoVar"
+                );
+
+            double starter =
+                getMTSVariableValue(
+                    firstEngine,
+                    "electricStarterVar"
+                );
+
+            double rpm =
+                getNumericField(
+                    firstEngine,
+                    "rpm"
+                );
+
+            source.sendSuccess(
+                () -> Component.literal(
+                    String.format(
+                        "Engine sync: magneto %.0f | starter %.0f | RPM %.0f",
+                        magneto,
+                        starter,
+                        rpm
+                    )
+                ),
+                false
+            );
+        }
 
         source.sendSuccess(
             () -> Component.literal(
