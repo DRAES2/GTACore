@@ -175,6 +175,25 @@ public class GTACore {
     private static double followHeadingError = 0.0;
 
     /*
+     * SHARP REDIRECT
+     *
+     * Used when the followed player suddenly cuts hard across or
+     * behind the car.  The AI first sheds speed, then uses a brief
+     * parking-brake pulse at high speed to help rotate, and finally
+     * powers through the remainder of the turn.
+     */
+    private static final double FOLLOW_SHARP_REDIRECT_DEGREES = 60.0;
+    private static final double FOLLOW_DRIFT_REDIRECT_DEGREES = 100.0;
+    private static final double FOLLOW_REDIRECT_EXIT_DEGREES = 12.0;
+    private static final double FOLLOW_REDIRECT_BRAKE_SPEED = 2.4;
+    private static final double FOLLOW_DRIFT_MIN_SPEED = 3.0;
+    private static final int FOLLOW_DRIFT_PULSE_TICKS = 4;
+    private static final double FOLLOW_REDIRECT_STEERING = 26.0;
+
+    private static boolean followSharpRedirecting = false;
+    private static int followDriftPulseTicksRemaining = 0;
+
+    /*
      * FORWARD_ONLY_AUTONOMY
      *
      * Back to basics: autonomous follow/home never use reverse.
@@ -227,6 +246,7 @@ public class GTACore {
     private static double aiTargetSpeed = 0.0;
     private static double aiCurrentSpeed = 0.0;
     private static double brakeCommand = 0.0;
+    private static double parkingBrakeCommand = 0.0;
 
     /*
      * Manual-transmission fallback.  Automatic MTS engines are left
@@ -429,6 +449,9 @@ public class GTACore {
                             followTurnDirection = 1.0;
                             followTrajectoryLocked = false;
                             followHeadingError = 0.0;
+                            followSharpRedirecting = false;
+                            followDriftPulseTicksRemaining = 0;
+                            parkingBrakeCommand = 0.0;
                             homeTurnPhase = HOME_TURN_FOLLOW;
                             homeTurnDirection = 1.0;
                             throttleCommand = 0.0;
@@ -1058,6 +1081,9 @@ public class GTACore {
                             followTurnCooldownTicks = 0;
                             followTrajectoryLocked = false;
                             followHeadingError = 0.0;
+                            followSharpRedirecting = false;
+                            followDriftPulseTicksRemaining = 0;
+                            parkingBrakeCommand = 0.0;
 
                             context.getSource()
                                 .sendSuccess(
@@ -1083,6 +1109,9 @@ public class GTACore {
                             followTurnCooldownTicks = 0;
                             followTrajectoryLocked = false;
                             followHeadingError = 0.0;
+                            followSharpRedirecting = false;
+                            followDriftPulseTicksRemaining = 0;
+                            parkingBrakeCommand = 0.0;
 
                             driveForward = false;
                             driveReverse = false;
@@ -1118,6 +1147,7 @@ public class GTACore {
                             driveReverse = false;
                             throttleCommand = 0.0;
                             brakeCommand = 1.0;
+                            parkingBrakeCommand = 0.0;
                             aiTargetSpeed = 0.0;
                             steeringTarget = 0.0;
 
@@ -1473,7 +1503,7 @@ public class GTACore {
                 setMTSVariable(
                     vehicle,
                     "parkingBrakeVar",
-                    0.0
+                    parkingBrakeCommand
                 );
 
                 boolean forwardGearReady =
@@ -1509,7 +1539,10 @@ public class GTACore {
                     setMTSVariable(
                         vehicle,
                         "throttleVar",
-                        brakeCommand > 0.01
+                        (
+                            brakeCommand > 0.01 ||
+                            parkingBrakeCommand > 0.01
+                        )
                             ? 0.0
                             : throttleCommand
                     );
@@ -1590,6 +1623,7 @@ public class GTACore {
 
                 throttleCommand = 0.0;
                 brakeCommand = 1.0;
+                parkingBrakeCommand = 0.0;
                 aiTargetSpeed = 0.0;
 
                 setMTSVariable(
@@ -1640,12 +1674,15 @@ public class GTACore {
 
             followTargetId = null;
             followTrajectoryLocked = false;
+            followSharpRedirecting = false;
+            followDriftPulseTicksRemaining = 0;
             followHeadingError = 0.0;
 
             driveForward = false;
             driveReverse = false;
             throttleCommand = 0.0;
             brakeCommand = 1.0;
+            parkingBrakeCommand = 0.0;
 
             centerSteeringImmediately(
                 vehicle
@@ -1660,12 +1697,15 @@ public class GTACore {
         ) {
 
             followTrajectoryLocked = false;
+            followSharpRedirecting = false;
+            followDriftPulseTicksRemaining = 0;
             followHeadingError = 0.0;
 
             driveForward = false;
             driveReverse = false;
             throttleCommand = 0.0;
             brakeCommand = 1.0;
+            parkingBrakeCommand = 0.0;
 
             centerSteeringImmediately(
                 vehicle
@@ -1688,20 +1728,25 @@ public class GTACore {
                 dz * dz
             );
 
+        aiCurrentSpeed =
+            getVehicleSpeedBlocksPerSecond(
+                vehicle
+            );
+
         if (
             distance <=
                 FOLLOW_STOP_DISTANCE
         ) {
 
-            /*
-             * At follow distance, brake and point the wheels straight.
-             * Do not sit there hunting for a perfect heading.
-             */
             driveForward = false;
             driveReverse = false;
             throttleCommand = 0.0;
             brakeCommand = 1.0;
+            parkingBrakeCommand = 0.0;
+
             followTrajectoryLocked = true;
+            followSharpRedirecting = false;
+            followDriftPulseTicksRemaining = 0;
 
             centerSteeringImmediately(
                 vehicle
@@ -1723,9 +1768,121 @@ public class GTACore {
             );
 
         /*
-         * Once locked, ignore small target movement.  The player must
-         * actually leave the car's general forward trajectory before
-         * steering is allowed again.
+         * A sudden large heading change enters SHARP REDIRECT mode.
+         * This mode is intentionally separate from normal follow
+         * steering so the car can react aggressively without causing
+         * ordinary straight-line twitching.
+         */
+        if (
+            !followSharpRedirecting &&
+            absoluteError >=
+                FOLLOW_SHARP_REDIRECT_DEGREES
+        ) {
+
+            followSharpRedirecting = true;
+            followTrajectoryLocked = false;
+            followDriftPulseTicksRemaining = 0;
+        }
+
+        if (followSharpRedirecting) {
+
+            double turnDirection =
+                Math.signum(
+                    followHeadingError
+                );
+
+            steeringTarget =
+                turnDirection *
+                FOLLOW_REDIRECT_STEERING;
+
+            /*
+             * Phase 1: shed speed fast.
+             */
+            if (
+                aiCurrentSpeed >
+                    FOLLOW_REDIRECT_BRAKE_SPEED
+            ) {
+
+                throttleCommand = 0.0;
+                brakeCommand = 0.78;
+
+                /*
+                 * For a very sharp cut at real speed, pulse MTS's
+                 * parking brake for only a few ticks while steering.
+                 * This helps the car rotate instead of making a huge
+                 * grip-limited arc.  It is deliberately momentary.
+                 */
+                if (
+                    absoluteError >=
+                        FOLLOW_DRIFT_REDIRECT_DEGREES &&
+                    aiCurrentSpeed >=
+                        FOLLOW_DRIFT_MIN_SPEED
+                ) {
+
+                    if (
+                        followDriftPulseTicksRemaining <= 0
+                    ) {
+                        followDriftPulseTicksRemaining =
+                            FOLLOW_DRIFT_PULSE_TICKS;
+                    }
+
+                    parkingBrakeCommand = 1.0;
+
+                    followDriftPulseTicksRemaining--;
+
+                    if (
+                        followDriftPulseTicksRemaining <= 0
+                    ) {
+                        parkingBrakeCommand = 0.0;
+                    }
+
+                } else {
+
+                    parkingBrakeCommand = 0.0;
+                    followDriftPulseTicksRemaining = 0;
+                }
+
+            } else {
+
+                /*
+                 * Phase 2: once enough speed is gone, release the
+                 * brakes and power through the turn.
+                 */
+                parkingBrakeCommand = 0.0;
+                followDriftPulseTicksRemaining = 0;
+                brakeCommand = 0.0;
+                throttleCommand = 0.42;
+            }
+
+            /*
+             * Once the nose is generally pointed toward the player,
+             * immediately center the wheel and return to normal
+             * full-speed trajectory lock.
+             */
+            if (
+                absoluteError <=
+                    FOLLOW_REDIRECT_EXIT_DEGREES
+            ) {
+
+                followSharpRedirecting = false;
+                followTrajectoryLocked = true;
+                parkingBrakeCommand = 0.0;
+                brakeCommand = 0.0;
+                throttleCommand = 1.0;
+
+                centerSteeringImmediately(
+                    vehicle
+                );
+            }
+
+            driveReverse = false;
+            driveForward = true;
+
+            return;
+        }
+
+        /*
+         * Normal trajectory-lock behavior.
          */
         if (followTrajectoryLocked) {
 
@@ -1745,11 +1902,6 @@ public class GTACore {
             }
         }
 
-        /*
-         * If not locked, KEEP turning until we enter the alignment
-         * band.  The moment alignment is good enough, snap the wheel
-         * back to exact center so steering is not held too long.
-         */
         if (!followTrajectoryLocked) {
 
             if (
@@ -1774,10 +1926,6 @@ public class GTACore {
                         FOLLOW_ALIGNMENT_MAX_STEERING
                     );
 
-                /*
-                 * Make sure a real correction is applied while
-                 * aligning, but scale down naturally near center.
-                 */
                 if (
                     Math.abs(
                         requestedSteering
@@ -1798,14 +1946,11 @@ public class GTACore {
         }
 
         /*
-         * FOLLOW ACCELERATION = the proven /gta forward behavior.
-         *
-         * Full virtual-W input, brake released, and let the MTS
-         * automatic transmission perform the gear changes it already
-         * handles correctly.
+         * Proven normal acceleration path.
          */
         throttleCommand = 1.0;
         brakeCommand = 0.0;
+        parkingBrakeCommand = 0.0;
         aiTargetSpeed = 0.0;
 
         driveReverse = false;
@@ -3703,9 +3848,10 @@ public class GTACore {
         source.sendSuccess(
             () -> Component.literal(
                 String.format(
-                    "Following: %s | trajectory locked: %s | heading error: %.1f deg",
+                    "Following: %s | locked: %s | sharp redirect: %s | heading error: %.1f deg",
                     followTargetId != null,
                     followTrajectoryLocked,
+                    followSharpRedirecting,
                     followHeadingError
                 )
             ),
@@ -3766,6 +3912,8 @@ public class GTACore {
                     + throttle
                     + " | AI brake request: "
                     + brakeCommand
+                    + " | parking brake request: "
+                    + parkingBrakeCommand
             ),
             false
         );
