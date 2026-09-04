@@ -155,6 +155,26 @@ public class GTACore {
     private static final double FOLLOW_TURN_STEERING = 28.0;
 
     /*
+     * FOLLOW TRAJECTORY LOCK
+     *
+     * The car has two simple states:
+     * 1. ALIGNING: keep steering toward the player until the nose is
+     *    generally lined up.
+     * 2. LOCKED: wheel stays exactly centered.  Do not steer again
+     *    until the player moves clearly outside the car's trajectory.
+     *
+     * The wide gap between ENTER and EXIT is deliberate hysteresis.
+     * It prevents tiny target motion from causing left/right twitching.
+     */
+    private static final double FOLLOW_ALIGNMENT_ENTER_DEGREES = 8.0;
+    private static final double FOLLOW_ALIGNMENT_EXIT_DEGREES = 20.0;
+    private static final double FOLLOW_ALIGNMENT_MAX_STEERING = 18.0;
+    private static final double FOLLOW_ALIGNMENT_MIN_STEERING = 4.0;
+
+    private static boolean followTrajectoryLocked = false;
+    private static double followHeadingError = 0.0;
+
+    /*
      * FORWARD_ONLY_AUTONOMY
      *
      * Back to basics: autonomous follow/home never use reverse.
@@ -407,6 +427,8 @@ public class GTACore {
                             followTargetId = null;
                             followTurnPhase = FOLLOW_TURN_FOLLOW;
                             followTurnDirection = 1.0;
+                            followTrajectoryLocked = false;
+                            followHeadingError = 0.0;
                             homeTurnPhase = HOME_TURN_FOLLOW;
                             homeTurnDirection = 1.0;
                             throttleCommand = 0.0;
@@ -1034,6 +1056,8 @@ public class GTACore {
                             followTurnDirection = 1.0;
                             followTurnTicks = 0;
                             followTurnCooldownTicks = 0;
+                            followTrajectoryLocked = false;
+                            followHeadingError = 0.0;
 
                             context.getSource()
                                 .sendSuccess(
@@ -1057,6 +1081,8 @@ public class GTACore {
                             followTurnDirection = 1.0;
                             followTurnTicks = 0;
                             followTurnCooldownTicks = 0;
+                            followTrajectoryLocked = false;
+                            followHeadingError = 0.0;
 
                             driveForward = false;
                             driveReverse = false;
@@ -1613,11 +1639,17 @@ public class GTACore {
         if (target == null) {
 
             followTargetId = null;
+            followTrajectoryLocked = false;
+            followHeadingError = 0.0;
 
             driveForward = false;
             driveReverse = false;
-            throttleCommand = 1.0;
-            steeringTarget = 0.0;
+            throttleCommand = 0.0;
+            brakeCommand = 1.0;
+
+            centerSteeringImmediately(
+                vehicle
+            );
 
             return;
         }
@@ -1627,10 +1659,17 @@ public class GTACore {
             wrapper.level().dimension()
         ) {
 
+            followTrajectoryLocked = false;
+            followHeadingError = 0.0;
+
             driveForward = false;
             driveReverse = false;
-            throttleCommand = 1.0;
-            steeringTarget = 0.0;
+            throttleCommand = 0.0;
+            brakeCommand = 1.0;
+
+            centerSteeringImmediately(
+                vehicle
+            );
 
             return;
         }
@@ -1654,33 +1693,120 @@ public class GTACore {
                 FOLLOW_STOP_DISTANCE
         ) {
 
+            /*
+             * At follow distance, brake and point the wheels straight.
+             * Do not sit there hunting for a perfect heading.
+             */
             driveForward = false;
             driveReverse = false;
-            throttleCommand = 1.0;
-            steeringTarget = 0.0;
+            throttleCommand = 0.0;
+            brakeCommand = 1.0;
+            followTrajectoryLocked = true;
+
+            centerSteeringImmediately(
+                vehicle
+            );
 
             return;
         }
 
-        double headingError =
+        followHeadingError =
             getHeadingErrorToTarget(
                 vehicle,
                 dx,
                 dz
             );
 
-        double targetSpeed =
-            calculateAITargetSpeed(
-                distance,
-                headingError,
-                FOLLOW_STOP_DISTANCE
+        double absoluteError =
+            Math.abs(
+                followHeadingError
             );
 
-        applyPrecisionAIControl(
-            vehicle,
-            headingError,
-            targetSpeed
-        );
+        /*
+         * Once locked, ignore small target movement.  The player must
+         * actually leave the car's general forward trajectory before
+         * steering is allowed again.
+         */
+        if (followTrajectoryLocked) {
+
+            if (
+                absoluteError <
+                    FOLLOW_ALIGNMENT_EXIT_DEGREES
+            ) {
+
+                centerSteeringImmediately(
+                    vehicle
+                );
+
+            } else {
+
+                followTrajectoryLocked =
+                    false;
+            }
+        }
+
+        /*
+         * If not locked, KEEP turning until we enter the alignment
+         * band.  The moment alignment is good enough, snap the wheel
+         * back to exact center so steering is not held too long.
+         */
+        if (!followTrajectoryLocked) {
+
+            if (
+                absoluteError <=
+                    FOLLOW_ALIGNMENT_ENTER_DEGREES
+            ) {
+
+                followTrajectoryLocked =
+                    true;
+
+                centerSteeringImmediately(
+                    vehicle
+                );
+
+            } else {
+
+                double requestedSteering =
+                    clamp(
+                        followHeadingError *
+                            0.30,
+                        -FOLLOW_ALIGNMENT_MAX_STEERING,
+                        FOLLOW_ALIGNMENT_MAX_STEERING
+                    );
+
+                /*
+                 * Make sure a real correction is applied while
+                 * aligning, but scale down naturally near center.
+                 */
+                if (
+                    Math.abs(
+                        requestedSteering
+                    ) <
+                        FOLLOW_ALIGNMENT_MIN_STEERING
+                ) {
+
+                    requestedSteering =
+                        Math.copySign(
+                            FOLLOW_ALIGNMENT_MIN_STEERING,
+                            followHeadingError
+                        );
+                }
+
+                steeringTarget =
+                    requestedSteering;
+            }
+        }
+
+        /*
+         * FOLLOW ACCELERATION = the proven /gta forward behavior.
+         *
+         * Full virtual-W input, brake released, and let the MTS
+         * automatic transmission perform the gear changes it already
+         * handles correctly.
+         */
+        throttleCommand = 1.0;
+        brakeCommand = 0.0;
+        aiTargetSpeed = 0.0;
 
         driveReverse = false;
         driveForward = true;
@@ -2489,6 +2615,28 @@ public class GTACore {
     // ============================================================
     // STEERING
     // ============================================================
+
+    private static void centerSteeringImmediately(
+        Object vehicle
+    ) throws Exception {
+
+        /*
+         * 0 is not a "turn toward zero" command.  It is the physical
+         * centered-wheel position.  Set both our controller state and
+         * MTS's rudder variable immediately so the previous turn is
+         * not held for several extra ticks.
+         */
+        steeringTarget = 0.0;
+        steeringCurrent = 0.0;
+
+        resetSteeringTap();
+
+        setMTSVariable(
+            vehicle,
+            "rudderInputVar",
+            0.0
+        );
+    }
 
     private static void updateSteering(
         Object vehicle
@@ -3554,9 +3702,12 @@ public class GTACore {
 
         source.sendSuccess(
             () -> Component.literal(
-                "Following: "
-                    + (followTargetId != null)
-                    + " | AI mode: forward-only"
+                String.format(
+                    "Following: %s | trajectory locked: %s | heading error: %.1f deg",
+                    followTargetId != null,
+                    followTrajectoryLocked,
+                    followHeadingError
+                )
             ),
             false
         );
