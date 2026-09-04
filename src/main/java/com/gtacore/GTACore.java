@@ -36,6 +36,26 @@ public class GTACore {
      * driveForward = our virtual W key.
      */
     private static boolean driveForward = false;
+    private static boolean driveReverse = false;
+    private static double throttleCommand = 1.0;
+
+    /*
+     * Prototype home-return system.
+     *
+     * This is intentionally simple point-to-point navigation for
+     * open areas.  It does not yet know roads or avoid obstacles.
+     * Later the police station/road-graph system will replace the
+     * straight-line homing controller.
+     */
+    private static boolean returningHome = false;
+    private static boolean homeSet = false;
+    private static double homeX = 0.0;
+    private static double homeY = 0.0;
+    private static double homeZ = 0.0;
+    private static String homeDimension = "";
+    private static final double HOME_STOP_DISTANCE = 3.5;
+    private static final double HOME_SLOW_DISTANCE = 12.0;
+    private static final double HOME_STEERING_GAIN = 0.75;
 
     /*
      * Steering is expressed in MTS rudder-input degrees.
@@ -204,6 +224,9 @@ public class GTACore {
                                     .getUUID();
 
                             driveForward = false;
+                            driveReverse = false;
+                            returningHome = false;
+                            throttleCommand = 1.0;
                             steeringTarget = 0.0;
                             steeringCurrent = 0.0;
 
@@ -313,7 +336,10 @@ public class GTACore {
                                 return 0;
                             }
 
+                            returningHome = false;
+                            driveReverse = false;
                             driveForward = true;
+                            throttleCommand = 1.0;
 
                             context.getSource()
                                 .sendSuccess(
@@ -351,6 +377,7 @@ public class GTACore {
                                 return 0;
                             }
 
+                            returningHome = false;
                             steeringTarget =
                                 -MAX_STEERING_INPUT;
 
@@ -380,6 +407,7 @@ public class GTACore {
                                 return 0;
                             }
 
+                            returningHome = false;
                             steeringTarget =
                                 MAX_STEERING_INPUT;
 
@@ -409,12 +437,244 @@ public class GTACore {
                                 return 0;
                             }
 
+                            returningHome = false;
                             steeringTarget = 0.0;
 
                             context.getSource()
                                 .sendSuccess(
                                     () -> Component.literal(
                                         "Steering target: STRAIGHT"
+                                    ),
+                                    false
+                                );
+
+                            return Command.SINGLE_SUCCESS;
+                        })
+                )
+
+                // ------------------------------------------------
+                // /gta reverse
+                //
+                // Virtual reverse input.  GTACore shifts the MTS
+                // transmission through neutral into reverse before
+                // applying throttle.
+                // ------------------------------------------------
+                .then(
+                    Commands.literal("reverse")
+                        .executes(context -> {
+
+                            if (selectedCar == null) {
+                                context.getSource()
+                                    .sendFailure(
+                                        Component.literal(
+                                            "Select a car first."
+                                        )
+                                    );
+                                return 0;
+                            }
+
+                            returningHome = false;
+                            driveForward = false;
+                            driveReverse = true;
+                            throttleCommand = 1.0;
+
+                            context.getSource()
+                                .sendSuccess(
+                                    () -> Component.literal(
+                                        "Virtual reverse: ON"
+                                    ),
+                                    false
+                                );
+
+                            return Command.SINGLE_SUCCESS;
+                        })
+                )
+
+                // ------------------------------------------------
+                // /gta sethome
+                //
+                // Saves the selected vehicle's current location as
+                // its prototype home/station position.
+                // ------------------------------------------------
+                .then(
+                    Commands.literal("sethome")
+                        .executes(context -> {
+
+                            if (selectedCar == null) {
+                                context.getSource()
+                                    .sendFailure(
+                                        Component.literal(
+                                            "Select a car first."
+                                        )
+                                    );
+                                return 0;
+                            }
+
+                            Entity wrapper =
+                                getSelectedWrapper(
+                                    context.getSource()
+                                        .getServer()
+                                );
+
+                            if (wrapper == null) {
+                                context.getSource()
+                                    .sendFailure(
+                                        Component.literal(
+                                            "Selected car is not loaded."
+                                        )
+                                    );
+                                return 0;
+                            }
+
+                            homeX = wrapper.getX();
+                            homeY = wrapper.getY();
+                            homeZ = wrapper.getZ();
+                            homeDimension =
+                                wrapper.level()
+                                    .dimension()
+                                    .location()
+                                    .toString();
+                            homeSet = true;
+                            returningHome = false;
+
+                            String homeText =
+                                String.format(
+                                    "Home set: %.1f, %.1f, %.1f",
+                                    homeX,
+                                    homeY,
+                                    homeZ
+                                );
+
+                            context.getSource()
+                                .sendSuccess(
+                                    () -> Component.literal(
+                                        homeText
+                                    ),
+                                    false
+                                );
+
+                            return Command.SINGLE_SUCCESS;
+                        })
+                )
+
+                // ------------------------------------------------
+                // /gta home
+                //
+                // Starts the selected car and drives it back toward
+                // the saved home point.
+                // ------------------------------------------------
+                .then(
+                    Commands.literal("home")
+                        .executes(context -> {
+
+                            if (selectedCar == null) {
+                                context.getSource()
+                                    .sendFailure(
+                                        Component.literal(
+                                            "Select a car first."
+                                        )
+                                    );
+                                return 0;
+                            }
+
+                            if (!homeSet) {
+                                context.getSource()
+                                    .sendFailure(
+                                        Component.literal(
+                                            "Set a home first with /gta sethome"
+                                        )
+                                    );
+                                return 0;
+                            }
+
+                            try {
+                                MinecraftServer server =
+                                    context.getSource()
+                                        .getServer();
+
+                                Object vehicle =
+                                    getSelectedVehicle(server);
+
+                                Entity wrapper =
+                                    getSelectedWrapper(server);
+
+                                if (
+                                    vehicle == null ||
+                                    wrapper == null
+                                ) {
+                                    context.getSource()
+                                        .sendFailure(
+                                            Component.literal(
+                                                "Selected car is not loaded."
+                                            )
+                                        );
+                                    return 0;
+                                }
+
+                                String currentDimension =
+                                    wrapper.level()
+                                        .dimension()
+                                        .location()
+                                        .toString();
+
+                                if (
+                                    !homeDimension.equals(
+                                        currentDimension
+                                    )
+                                ) {
+                                    context.getSource()
+                                        .sendFailure(
+                                            Component.literal(
+                                                "The car is not in its home dimension."
+                                            )
+                                        );
+                                    return 0;
+                                }
+
+                                startVehicle(vehicle);
+
+                                driveReverse = false;
+                                driveForward = true;
+                                throttleCommand = 0.35;
+                                returningHome = true;
+
+                                context.getSource()
+                                    .sendSuccess(
+                                        () -> Component.literal(
+                                            "Returning to home."
+                                        ),
+                                        false
+                                    );
+
+                            } catch (Exception e) {
+                                e.printStackTrace();
+                                context.getSource()
+                                    .sendFailure(
+                                        Component.literal(
+                                            "Could not start home return. Check console."
+                                        )
+                                    );
+                                return 0;
+                            }
+
+                            return Command.SINGLE_SUCCESS;
+                        })
+                )
+
+                .then(
+                    Commands.literal("cancelhome")
+                        .executes(context -> {
+
+                            returningHome = false;
+                            driveForward = false;
+                            driveReverse = false;
+                            throttleCommand = 1.0;
+                            steeringTarget = 0.0;
+
+                            context.getSource()
+                                .sendSuccess(
+                                    () -> Component.literal(
+                                        "Home return cancelled."
                                     ),
                                     false
                                 );
@@ -432,13 +692,17 @@ public class GTACore {
                     Commands.literal("stop")
                         .executes(context -> {
 
+                            returningHome = false;
                             driveForward = false;
+                            driveReverse = false;
+                            throttleCommand = 1.0;
+                            steeringTarget = 0.0;
 
                             context.getSource()
                                 .sendSuccess(
                                     () ->
                                         Component.literal(
-                                            "Virtual W: OFF | Brake: ON"
+                                            "Drive: OFF | Brake: ON"
                                         ),
                                     false
                                 );
@@ -639,8 +903,23 @@ public class GTACore {
                     event.getServer()
                 );
 
-            if (vehicle == null) {
+            Entity wrapper =
+                getSelectedWrapper(
+                    event.getServer()
+                );
+
+            if (
+                vehicle == null ||
+                wrapper == null
+            ) {
                 return;
+            }
+
+            if (returningHome) {
+                updateHomeNavigation(
+                    vehicle,
+                    wrapper
+                );
             }
 
             updateSteering(vehicle);
@@ -681,7 +960,7 @@ public class GTACore {
                     setMTSVariable(
                         vehicle,
                         "throttleVar",
-                        1.0
+                        throttleCommand
                     );
 
                 } else {
@@ -690,6 +969,48 @@ public class GTACore {
                      * Hold the car still while the
                      * transmission moves toward 1st.
                      */
+
+                    setMTSVariable(
+                        vehicle,
+                        "throttleVar",
+                        0.0
+                    );
+
+                    setMTSVariable(
+                        vehicle,
+                        "brakeVar",
+                        1.0
+                    );
+                }
+
+            } else if (driveReverse) {
+
+                setMTSVariable(
+                    vehicle,
+                    "parkingBrakeVar",
+                    0.0
+                );
+
+                boolean reverseGearReady =
+                    ensureReverseGear(
+                        vehicle
+                    );
+
+                if (reverseGearReady) {
+
+                    setMTSVariable(
+                        vehicle,
+                        "brakeVar",
+                        0.0
+                    );
+
+                    setMTSVariable(
+                        vehicle,
+                        "throttleVar",
+                        throttleCommand
+                    );
+
+                } else {
 
                     setMTSVariable(
                         vehicle,
@@ -730,6 +1051,8 @@ public class GTACore {
         } catch (Exception e) {
 
             driveForward = false;
+            driveReverse = false;
+            returningHome = false;
 
             System.err.println(
                 "[GTACore] Vehicle control failed:"
@@ -737,6 +1060,158 @@ public class GTACore {
 
             e.printStackTrace();
         }
+    }
+
+    // ============================================================
+    // HOME NAVIGATION
+    // ============================================================
+
+    private static void updateHomeNavigation(
+        Object vehicle,
+        Entity wrapper
+    ) throws Exception {
+
+        double dx =
+            homeX - wrapper.getX();
+
+        double dz =
+            homeZ - wrapper.getZ();
+
+        double distance =
+            Math.sqrt(
+                dx * dx +
+                dz * dz
+            );
+
+        if (
+            distance <=
+            HOME_STOP_DISTANCE
+        ) {
+
+            returningHome = false;
+            driveForward = false;
+            driveReverse = false;
+            throttleCommand = 1.0;
+            steeringTarget = 0.0;
+
+            System.out.println(
+                "[GTACore] Vehicle arrived home."
+            );
+
+            return;
+        }
+
+        /*
+         * MTS yaw 0 faces +Z.  atan2(dx, dz) therefore gives
+         * the desired MTS heading toward the home point.
+         */
+        double desiredYaw =
+            Math.toDegrees(
+                Math.atan2(
+                    dx,
+                    dz
+                )
+            );
+
+        double currentYaw =
+            getVehicleYaw(vehicle);
+
+        double yawError =
+            wrapDegrees(
+                desiredYaw -
+                currentYaw
+            );
+
+        steeringTarget =
+            clamp(
+                yawError *
+                    HOME_STEERING_GAIN,
+                -MAX_STEERING_INPUT,
+                MAX_STEERING_INPUT
+            );
+
+        /*
+         * Slow down for the final approach so the car does not
+         * blast through the home point.
+         */
+        throttleCommand =
+            distance <= HOME_SLOW_DISTANCE
+                ? 0.20
+                : 0.35;
+
+        driveReverse = false;
+        driveForward = true;
+    }
+
+    private static double getVehicleYaw(
+        Object vehicle
+    ) throws Exception {
+
+        Object orientation =
+            getFieldValue(
+                vehicle,
+                "orientation"
+            );
+
+        Method convertToAngles =
+            orientation
+                .getClass()
+                .getMethod(
+                    "convertToAngles"
+                );
+
+        Object angles =
+            convertToAngles.invoke(
+                orientation
+            );
+
+        Field yField =
+            findField(
+                angles.getClass(),
+                "y"
+            );
+
+        if (yField == null) {
+            throw new NoSuchFieldException(
+                "orientation angles.y"
+            );
+        }
+
+        yField.setAccessible(true);
+
+        return yField.getDouble(
+            angles
+        );
+    }
+
+    private static double wrapDegrees(
+        double angle
+    ) {
+
+        while (angle > 180.0) {
+            angle -= 360.0;
+        }
+
+        while (angle < -180.0) {
+            angle += 360.0;
+        }
+
+        return angle;
+    }
+
+    private static double clamp(
+        double value,
+        double minimum,
+        double maximum
+    ) {
+
+        return Math.max(
+            minimum,
+            Math.min(
+                maximum,
+                value
+            )
+        );
     }
 
     // ============================================================
@@ -983,6 +1458,7 @@ public class GTACore {
          */
 
         driveForward = false;
+        driveReverse = false;
 
         setMTSVariable(
             vehicle,
@@ -1083,6 +1559,56 @@ public class GTACore {
         }
 
         return allForward;
+    }
+
+    private static boolean ensureReverseGear(
+        Object vehicle
+    ) throws Exception {
+
+        List<?> engines =
+            getEngines(vehicle);
+
+        if (engines.isEmpty()) {
+            return false;
+        }
+
+        boolean allReverse =
+            true;
+
+        for (Object engine : engines) {
+
+            double gear =
+                getMTSVariableValue(
+                    engine,
+                    "currentGearVar"
+                );
+
+            if (gear > 0.0) {
+
+                /*
+                 * Going directly from a forward gear into reverse
+                 * is undesirable.  Put the transmission in neutral
+                 * first, then the next tick can select reverse.
+                 */
+                allReverse = false;
+
+                invokeNoArg(
+                    engine,
+                    "shiftNeutral"
+                );
+
+            } else if (gear == 0.0) {
+
+                allReverse = false;
+
+                invokeNoArg(
+                    engine,
+                    "shiftDown"
+                );
+            }
+        }
+
+        return allReverse;
     }
 
     // ============================================================
@@ -1187,9 +1713,33 @@ public class GTACore {
             () -> Component.literal(
                 "Forward/W: "
                     + driveForward
+                    + " | Reverse: "
+                    + driveReverse
             ),
             false
         );
+
+        source.sendSuccess(
+            () -> Component.literal(
+                "Returning home: "
+                    + returningHome
+            ),
+            false
+        );
+
+        if (homeSet) {
+            source.sendSuccess(
+                () -> Component.literal(
+                    String.format(
+                        "Home: %.1f, %.1f, %.1f",
+                        homeX,
+                        homeY,
+                        homeZ
+                    )
+                ),
+                false
+            );
+        }
 
         source.sendSuccess(
             () -> Component.literal(
@@ -1229,6 +1779,32 @@ public class GTACore {
     // ============================================================
     // MTS REFLECTION BRIDGE
     // ============================================================
+
+    private static Entity getSelectedWrapper(
+        MinecraftServer server
+    ) {
+
+        if (selectedCar == null) {
+            return null;
+        }
+
+        for (
+            ServerLevel level :
+            server.getAllLevels()
+        ) {
+
+            Entity wrapper =
+                level.getEntity(
+                    selectedCar
+                );
+
+            if (wrapper != null) {
+                return wrapper;
+            }
+        }
+
+        return null;
+    }
 
     private static Object getSelectedVehicle(
         MinecraftServer server
