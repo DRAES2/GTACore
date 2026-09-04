@@ -17,6 +17,7 @@ import net.minecraftforge.fml.common.Mod;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
@@ -53,9 +54,43 @@ public class GTACore {
     private static double homeY = 0.0;
     private static double homeZ = 0.0;
     private static String homeDimension = "";
-    private static final double HOME_STOP_DISTANCE = 3.5;
-    private static final double HOME_SLOW_DISTANCE = 12.0;
-    private static final double HOME_STEERING_GAIN = 0.75;
+
+    /*
+     * Instead of trying to drive in one straight line through the
+     * world, GTACore records a breadcrumb trail while the car moves
+     * away from home.  /gta home follows those points in reverse.
+     *
+     * This is still a prototype, but it is much closer to how a
+     * police car should return through streets than the original
+     * direct-to-home steering.
+     */
+    private static final List<HomeWaypoint> homeTrail =
+        new ArrayList<>();
+
+    private static int homeTrailTickCounter = 0;
+    private static int homeRouteIndex = -1;
+
+    private static final double HOME_STOP_DISTANCE = 3.0;
+    private static final double HOME_WAYPOINT_SPACING = 5.0;
+    private static final double HOME_WAYPOINT_REACHED = 4.0;
+    private static final double HOME_STEERING_GAIN = 0.65;
+
+    private static final class HomeWaypoint {
+
+        private final double x;
+        private final double y;
+        private final double z;
+
+        private HomeWaypoint(
+            double x,
+            double y,
+            double z
+        ) {
+            this.x = x;
+            this.y = y;
+            this.z = z;
+        }
+    }
 
     /*
      * Steering is expressed in MTS rudder-input degrees.
@@ -536,6 +571,16 @@ public class GTACore {
                                     .toString();
                             homeSet = true;
                             returningHome = false;
+                            homeRouteIndex = -1;
+
+                            homeTrail.clear();
+                            homeTrail.add(
+                                new HomeWaypoint(
+                                    homeX,
+                                    homeY,
+                                    homeZ
+                                )
+                            );
 
                             String homeText =
                                 String.format(
@@ -631,17 +676,38 @@ public class GTACore {
                                     return 0;
                                 }
 
+                                recordHomeBreadcrumb(
+                                    wrapper,
+                                    true
+                                );
+
                                 startVehicle(vehicle);
+
+                                /*
+                                 * The final breadcrumb is the car's
+                                 * present location, so begin with the
+                                 * point immediately before it.
+                                 */
+                                homeRouteIndex =
+                                    Math.max(
+                                        0,
+                                        homeTrail.size() - 2
+                                    );
 
                                 driveReverse = false;
                                 driveForward = true;
-                                throttleCommand = 0.35;
+                                throttleCommand = 0.25;
                                 returningHome = true;
+
+                                int routePoints =
+                                    homeTrail.size();
 
                                 context.getSource()
                                     .sendSuccess(
                                         () -> Component.literal(
-                                            "Returning to home."
+                                            "Returning home along "
+                                                + routePoints
+                                                + " recorded points."
                                         ),
                                         false
                                     );
@@ -666,6 +732,7 @@ public class GTACore {
                         .executes(context -> {
 
                             returningHome = false;
+                            homeRouteIndex = -1;
                             driveForward = false;
                             driveReverse = false;
                             throttleCommand = 1.0;
@@ -693,6 +760,7 @@ public class GTACore {
                         .executes(context -> {
 
                             returningHome = false;
+                            homeRouteIndex = -1;
                             driveForward = false;
                             driveReverse = false;
                             throttleCommand = 1.0;
@@ -915,6 +983,37 @@ public class GTACore {
                 return;
             }
 
+            if (
+                homeSet &&
+                !returningHome
+            ) {
+
+                homeTrailTickCounter++;
+
+                if (
+                    homeTrailTickCounter >= 10
+                ) {
+                    homeTrailTickCounter = 0;
+
+                    String currentDimension =
+                        wrapper.level()
+                            .dimension()
+                            .location()
+                            .toString();
+
+                    if (
+                        homeDimension.equals(
+                            currentDimension
+                        )
+                    ) {
+                        recordHomeBreadcrumb(
+                            wrapper,
+                            false
+                        );
+                    }
+                }
+            }
+
             if (returningHome) {
                 updateHomeNavigation(
                     vehicle,
@@ -1066,16 +1165,91 @@ public class GTACore {
     // HOME NAVIGATION
     // ============================================================
 
+    private static void recordHomeBreadcrumb(
+        Entity wrapper,
+        boolean force
+    ) {
+
+        double x = wrapper.getX();
+        double y = wrapper.getY();
+        double z = wrapper.getZ();
+
+        if (homeTrail.isEmpty()) {
+
+            homeTrail.add(
+                new HomeWaypoint(
+                    x,
+                    y,
+                    z
+                )
+            );
+
+            return;
+        }
+
+        HomeWaypoint last =
+            homeTrail.get(
+                homeTrail.size() - 1
+            );
+
+        double dx =
+            x - last.x;
+
+        double dz =
+            z - last.z;
+
+        double planarDistance =
+            Math.sqrt(
+                dx * dx +
+                dz * dz
+            );
+
+        if (
+            force ||
+            planarDistance >=
+                HOME_WAYPOINT_SPACING
+        ) {
+
+            homeTrail.add(
+                new HomeWaypoint(
+                    x,
+                    y,
+                    z
+                )
+            );
+        }
+    }
+
     private static void updateHomeNavigation(
         Object vehicle,
         Entity wrapper
     ) throws Exception {
 
+        if (homeTrail.isEmpty()) {
+            returningHome = false;
+            driveForward = false;
+            return;
+        }
+
+        if (homeRouteIndex < 0) {
+            homeRouteIndex = 0;
+        }
+
+        HomeWaypoint target =
+            homeTrail.get(
+                Math.min(
+                    homeRouteIndex,
+                    homeTrail.size() - 1
+                )
+            );
+
         double dx =
-            homeX - wrapper.getX();
+            target.x -
+            wrapper.getX();
 
         double dz =
-            homeZ - wrapper.getZ();
+            target.z -
+            wrapper.getZ();
 
         double distance =
             Math.sqrt(
@@ -1083,9 +1257,42 @@ public class GTACore {
                 dz * dz
             );
 
-        if (
+        /*
+         * When we reach a breadcrumb, move to the previous one.
+         * Index 0 is the actual home position.
+         */
+        while (
+            homeRouteIndex > 0 &&
             distance <=
-            HOME_STOP_DISTANCE
+                HOME_WAYPOINT_REACHED
+        ) {
+
+            homeRouteIndex--;
+
+            target =
+                homeTrail.get(
+                    homeRouteIndex
+                );
+
+            dx =
+                target.x -
+                wrapper.getX();
+
+            dz =
+                target.z -
+                wrapper.getZ();
+
+            distance =
+                Math.sqrt(
+                    dx * dx +
+                    dz * dz
+                );
+        }
+
+        if (
+            homeRouteIndex == 0 &&
+            distance <=
+                HOME_STOP_DISTANCE
         ) {
 
             returningHome = false;
@@ -1093,6 +1300,20 @@ public class GTACore {
             driveReverse = false;
             throttleCommand = 1.0;
             steeringTarget = 0.0;
+            homeRouteIndex = -1;
+
+            /*
+             * We are back at the station.  Start a fresh outbound
+             * trail the next time this car leaves.
+             */
+            homeTrail.clear();
+            homeTrail.add(
+                new HomeWaypoint(
+                    homeX,
+                    homeY,
+                    homeZ
+                )
+            );
 
             System.out.println(
                 "[GTACore] Vehicle arrived home."
@@ -1101,51 +1322,89 @@ public class GTACore {
             return;
         }
 
-        /*
-         * MTS yaw 0 faces +Z.  atan2(dx, dz) therefore gives
-         * the desired MTS heading toward the home point.
-         */
-        double desiredYaw =
-            Math.toDegrees(
-                Math.atan2(
-                    dx,
-                    dz
-                )
-            );
-
-        double currentYaw =
-            getVehicleYaw(vehicle);
-
-        double yawError =
-            wrapDegrees(
-                desiredYaw -
-                currentYaw
+        double headingError =
+            getHeadingErrorToTarget(
+                vehicle,
+                dx,
+                dz
             );
 
         steeringTarget =
             clamp(
-                yawError *
+                headingError *
                     HOME_STEERING_GAIN,
                 -MAX_STEERING_INPUT,
                 MAX_STEERING_INPUT
             );
 
         /*
-         * Slow down for the final approach so the car does not
-         * blast through the home point.
+         * Turn slowly when a waypoint is far off the nose.
+         * This reduces the wide circles and overshoot behavior of
+         * the original direct-home controller.
          */
-        throttleCommand =
-            distance <= HOME_SLOW_DISTANCE
-                ? 0.20
-                : 0.35;
+        double absoluteError =
+            Math.abs(
+                headingError
+            );
+
+        if (absoluteError > 75.0) {
+
+            throttleCommand = 0.10;
+
+        } else if (
+            absoluteError > 40.0
+        ) {
+
+            throttleCommand = 0.16;
+
+        } else if (
+            absoluteError > 20.0
+        ) {
+
+            throttleCommand = 0.22;
+
+        } else {
+
+            throttleCommand = 0.30;
+        }
+
+        if (
+            homeRouteIndex == 0 &&
+            distance < 10.0
+        ) {
+
+            throttleCommand =
+                Math.min(
+                    throttleCommand,
+                    0.16
+                );
+        }
 
         driveReverse = false;
         driveForward = true;
     }
 
-    private static double getVehicleYaw(
-        Object vehicle
+    private static double getHeadingErrorToTarget(
+        Object vehicle,
+        double dx,
+        double dz
     ) throws Exception {
+
+        double targetLength =
+            Math.sqrt(
+                dx * dx +
+                dz * dz
+            );
+
+        if (targetLength < 0.001) {
+            return 0.0;
+        }
+
+        double targetX =
+            dx / targetLength;
+
+        double targetZ =
+            dz / targetLength;
 
         Object orientation =
             getFieldValue(
@@ -1153,50 +1412,85 @@ public class GTACore {
                 "orientation"
             );
 
-        Method convertToAngles =
-            orientation
-                .getClass()
-                .getMethod(
-                    "convertToAngles"
-                );
-
-        Object angles =
-            convertToAngles.invoke(
-                orientation
+        /*
+         * MTS uses local +Z as the vehicle's forward vector.
+         * For a rotation matrix, the transformed +Z vector is
+         * matrix column 2: (m02, m12, m22).
+         *
+         * Reading this vector directly avoids relying on Euler yaw
+         * conversion and its sign/convention edge cases.
+         */
+        double forwardX =
+            getDoubleField(
+                orientation,
+                "m02"
             );
 
-        Field yField =
-            findField(
-                angles.getClass(),
-                "y"
+        double forwardZ =
+            getDoubleField(
+                orientation,
+                "m22"
             );
 
-        if (yField == null) {
-            throw new NoSuchFieldException(
-                "orientation angles.y"
+        double forwardLength =
+            Math.sqrt(
+                forwardX * forwardX +
+                forwardZ * forwardZ
             );
+
+        if (forwardLength < 0.001) {
+            return 0.0;
         }
 
-        yField.setAccessible(true);
+        forwardX /= forwardLength;
+        forwardZ /= forwardLength;
 
-        return yField.getDouble(
-            angles
+        double dot =
+            clamp(
+                forwardX * targetX +
+                forwardZ * targetZ,
+                -1.0,
+                1.0
+            );
+
+        /*
+         * Positive angle = target is to the vehicle's right.
+         * That matches our tested positive MTS steering input.
+         */
+        double cross =
+            forwardZ * targetX -
+            forwardX * targetZ;
+
+        return Math.toDegrees(
+            Math.atan2(
+                cross,
+                dot
+            )
         );
     }
 
-    private static double wrapDegrees(
-        double angle
-    ) {
+    private static double getDoubleField(
+        Object owner,
+        String fieldName
+    ) throws Exception {
 
-        while (angle > 180.0) {
-            angle -= 360.0;
+        Field field =
+            findField(
+                owner.getClass(),
+                fieldName
+            );
+
+        if (field == null) {
+            throw new NoSuchFieldException(
+                fieldName
+            );
         }
 
-        while (angle < -180.0) {
-            angle += 360.0;
-        }
+        field.setAccessible(true);
 
-        return angle;
+        return field.getDouble(
+            owner
+        );
     }
 
     private static double clamp(
@@ -1736,6 +2030,16 @@ public class GTACore {
                         homeY,
                         homeZ
                     )
+                ),
+                false
+            );
+
+            source.sendSuccess(
+                () -> Component.literal(
+                    "Home trail points: "
+                        + homeTrail.size()
+                        + " | route index: "
+                        + homeRouteIndex
                 ),
                 false
             );
