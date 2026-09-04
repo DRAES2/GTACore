@@ -96,6 +96,12 @@ public class GTACore {
      * other while reversing.
      */
     private static double homeTurnDirection = 1.0;
+    private static int homeTurnTicks = 0;
+    private static int homeTurnCooldownTicks = 0;
+
+    private static final int HOME_REVERSE_MAX_TICKS = 14;
+    private static final int HOME_FORWARD_TURN_MAX_TICKS = 55;
+    private static final int HOME_TURN_COOLDOWN_TICKS = 60;
 
     private static final double HOME_STOP_DISTANCE = 3.0;
     private static final double HOME_WAYPOINT_SPACING = 5.0;
@@ -126,6 +132,18 @@ public class GTACore {
         FOLLOW_TURN_FOLLOW;
 
     private static double followTurnDirection = 1.0;
+    private static int followTurnTicks = 0;
+    private static int followTurnCooldownTicks = 0;
+
+    /*
+     * Reverse is only a brief repositioning move.  The old controller
+     * could remain in reverse indefinitely because its exit condition
+     * depended only on the heading error.  On dirt that created the
+     * left/right reversing crawl the player observed.
+     */
+    private static final int FOLLOW_REVERSE_MAX_TICKS = 14;
+    private static final int FOLLOW_FORWARD_TURN_MAX_TICKS = 55;
+    private static final int FOLLOW_TURN_COOLDOWN_TICKS = 60;
 
     private static final double FOLLOW_STOP_DISTANCE = 7.0;
     private static final double FOLLOW_RESUME_DISTANCE = 9.5;
@@ -878,6 +896,8 @@ public class GTACore {
                                 FOLLOW_TURN_FOLLOW;
 
                             followTurnDirection = 1.0;
+                            followTurnTicks = 0;
+                            followTurnCooldownTicks = 0;
 
                             requestAutoStart(
                                 context.getSource().getServer()
@@ -903,6 +923,8 @@ public class GTACore {
                             followTurnPhase =
                                 FOLLOW_TURN_FOLLOW;
                             followTurnDirection = 1.0;
+                            followTurnTicks = 0;
+                            followTurnCooldownTicks = 0;
 
                             driveForward = false;
                             driveReverse = false;
@@ -1378,6 +1400,8 @@ public class GTACore {
             followTargetId = null;
             followTurnPhase =
                 FOLLOW_TURN_FOLLOW;
+            followTurnTicks = 0;
+            followTurnCooldownTicks = 0;
 
             driveForward = false;
             driveReverse = false;
@@ -1423,6 +1447,7 @@ public class GTACore {
 
             followTurnPhase =
                 FOLLOW_TURN_FOLLOW;
+            followTurnTicks = 0;
 
             driveForward = false;
             driveReverse = false;
@@ -1444,15 +1469,22 @@ public class GTACore {
                 headingError
             );
 
+        if (followTurnCooldownTicks > 0) {
+            followTurnCooldownTicks--;
+        }
+
         if (
             followTurnPhase ==
                 FOLLOW_TURN_FOLLOW &&
+            followTurnCooldownTicks == 0 &&
             absoluteError >=
                 FOLLOW_TURN_START_ANGLE
         ) {
 
             followTurnPhase =
                 FOLLOW_TURN_REVERSE;
+
+            followTurnTicks = 0;
 
             followTurnDirection =
                 Math.abs(headingError) > 175.0
@@ -1468,21 +1500,32 @@ public class GTACore {
                 FOLLOW_TURN_REVERSE
         ) {
 
+            followTurnTicks++;
+
             steeringTarget =
                 -followTurnDirection *
                 FOLLOW_TURN_STEERING;
 
-            throttleCommand = 0.11;
+            throttleCommand = 0.10;
             driveForward = false;
             driveReverse = true;
 
+            /*
+             * Reverse only long enough to create room for the U-turn.
+             * Never use reverse as the actual way of reaching the
+             * player.
+             */
             if (
+                followTurnTicks >=
+                    FOLLOW_REVERSE_MAX_TICKS ||
                 absoluteError <=
                     FOLLOW_REVERSE_TO_FORWARD_ANGLE
             ) {
 
                 followTurnPhase =
                     FOLLOW_TURN_FORWARD;
+
+                followTurnTicks = 0;
             }
 
             return;
@@ -1492,6 +1535,8 @@ public class GTACore {
             followTurnPhase ==
                 FOLLOW_TURN_FORWARD
         ) {
+
+            followTurnTicks++;
 
             boolean crossedTargetHeading =
                 Math.signum(
@@ -1504,11 +1549,17 @@ public class GTACore {
             if (
                 absoluteError <=
                     FOLLOW_TURN_FINISH_ANGLE ||
-                crossedTargetHeading
+                crossedTargetHeading ||
+                followTurnTicks >=
+                    FOLLOW_FORWARD_TURN_MAX_TICKS
             ) {
 
                 followTurnPhase =
                     FOLLOW_TURN_FOLLOW;
+
+                followTurnTicks = 0;
+                followTurnCooldownTicks =
+                    FOLLOW_TURN_COOLDOWN_TICKS;
 
                 steeringTarget =
                     clamp(
@@ -1721,6 +1772,8 @@ public class GTACore {
             returningHome = false;
             homeTurnPhase = HOME_TURN_FOLLOW;
             homeTurnDirection = 1.0;
+            homeTurnTicks = 0;
+            homeTurnCooldownTicks = 0;
             driveForward = false;
             driveReverse = false;
             throttleCommand = 1.0;
@@ -1782,15 +1835,22 @@ public class GTACore {
          * Begin ONE deliberate turnaround if the return route starts
          * mostly behind the vehicle.
          */
+        if (homeTurnCooldownTicks > 0) {
+            homeTurnCooldownTicks--;
+        }
+
         if (
             homeTurnPhase ==
                 HOME_TURN_FOLLOW &&
+            homeTurnCooldownTicks == 0 &&
             absoluteError >=
                 HOME_TURN_START_ANGLE
         ) {
 
             homeTurnPhase =
                 HOME_TURN_REVERSE;
+
+            homeTurnTicks = 0;
 
             /*
              * At almost exactly 180 degrees, left/right is
@@ -1810,26 +1870,27 @@ public class GTACore {
                 HOME_TURN_REVERSE
         ) {
 
-            /*
-             * Back up while steering opposite the desired nose
-             * rotation.  Because the turn direction is latched, this
-             * cannot oscillate left/right like the previous version.
-             */
+            homeTurnTicks++;
+
             steeringTarget =
                 -homeTurnDirection *
                 HOME_TURN_STEERING;
 
-            throttleCommand = 0.13;
+            throttleCommand = 0.10;
             driveForward = false;
             driveReverse = true;
 
             if (
+                homeTurnTicks >=
+                    HOME_REVERSE_MAX_TICKS ||
                 absoluteError <=
                     HOME_REVERSE_TO_FORWARD_ANGLE
             ) {
 
                 homeTurnPhase =
                     HOME_TURN_FORWARD;
+
+                homeTurnTicks = 0;
             }
 
             return;
@@ -1839,6 +1900,8 @@ public class GTACore {
             homeTurnPhase ==
                 HOME_TURN_FORWARD
         ) {
+
+            homeTurnTicks++;
 
             /*
              * Complete the turn going forward, but DO NOT keep
@@ -1862,11 +1925,17 @@ public class GTACore {
             if (
                 absoluteError <=
                     HOME_TURN_FINISH_ANGLE ||
-                crossedTargetHeading
+                crossedTargetHeading ||
+                homeTurnTicks >=
+                    HOME_FORWARD_TURN_MAX_TICKS
             ) {
 
                 homeTurnPhase =
                     HOME_TURN_FOLLOW;
+
+                homeTurnTicks = 0;
+                homeTurnCooldownTicks =
+                    HOME_TURN_COOLDOWN_TICKS;
 
                 steeringTarget =
                     clamp(
@@ -2741,6 +2810,8 @@ public class GTACore {
                     + (followTargetId != null)
                     + " | follow turn phase: "
                     + followTurnPhase
+                    + " | cooldown: "
+                    + followTurnCooldownTicks
             ),
             false
         );
