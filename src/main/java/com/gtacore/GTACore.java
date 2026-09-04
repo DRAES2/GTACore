@@ -153,6 +153,24 @@ public class GTACore {
     private static final double FOLLOW_STEERING_GAIN = 0.60;
     private static final double FOLLOW_TURN_STEERING = 28.0;
 
+    /*
+     * FORWARD_ONLY_AUTONOMY
+     *
+     * Back to basics: autonomous follow/home never use reverse.
+     * The car only uses:
+     * - forward throttle
+     * - brake
+     * - left/right steering
+     *
+     * Reverse remains available as a manual debug command, but is
+     * intentionally excluded from driver AI for now.
+     */
+    private static final double AI_MAX_STEERING = 20.0;
+    private static final double AI_HARD_TURN_THROTTLE = 0.09;
+    private static final double AI_MEDIUM_TURN_THROTTLE = 0.14;
+    private static final double AI_LIGHT_TURN_THROTTLE = 0.20;
+    private static final double AI_STRAIGHT_THROTTLE = 0.30;
+
     private static final class HomeWaypoint {
 
         private final double x;
@@ -892,6 +910,8 @@ public class GTACore {
                             followTargetId =
                                 target.getUUID();
 
+                            driveReverse = false;
+
                             followTurnPhase =
                                 FOLLOW_TURN_FOLLOW;
 
@@ -1398,13 +1418,10 @@ public class GTACore {
         if (target == null) {
 
             followTargetId = null;
-            followTurnPhase =
-                FOLLOW_TURN_FOLLOW;
-            followTurnTicks = 0;
-            followTurnCooldownTicks = 0;
 
             driveForward = false;
             driveReverse = false;
+            throttleCommand = 1.0;
             steeringTarget = 0.0;
 
             return;
@@ -1417,6 +1434,7 @@ public class GTACore {
 
             driveForward = false;
             driveReverse = false;
+            throttleCommand = 1.0;
             steeringTarget = 0.0;
 
             return;
@@ -1436,18 +1454,10 @@ public class GTACore {
                 dz * dz
             );
 
-        /*
-         * Maintain a gap rather than trying to occupy the player's
-         * exact block.
-         */
         if (
             distance <=
                 FOLLOW_STOP_DISTANCE
         ) {
-
-            followTurnPhase =
-                FOLLOW_TURN_FOLLOW;
-            followTurnTicks = 0;
 
             driveForward = false;
             driveReverse = false;
@@ -1469,165 +1479,60 @@ public class GTACore {
                 headingError
             );
 
-        if (followTurnCooldownTicks > 0) {
-            followTurnCooldownTicks--;
-        }
-
-        if (
-            followTurnPhase ==
-                FOLLOW_TURN_FOLLOW &&
-            followTurnCooldownTicks == 0 &&
-            absoluteError >=
-                FOLLOW_TURN_START_ANGLE
-        ) {
-
-            followTurnPhase =
-                FOLLOW_TURN_REVERSE;
-
-            followTurnTicks = 0;
-
-            followTurnDirection =
-                Math.abs(headingError) > 175.0
-                    ? 1.0
-                    : Math.copySign(
-                        1.0,
-                        headingError
-                    );
-        }
-
-        if (
-            followTurnPhase ==
-                FOLLOW_TURN_REVERSE
-        ) {
-
-            followTurnTicks++;
-
-            steeringTarget =
-                -followTurnDirection *
-                FOLLOW_TURN_STEERING;
-
-            throttleCommand = 0.10;
-            driveForward = false;
-            driveReverse = true;
-
-            /*
-             * Reverse only long enough to create room for the U-turn.
-             * Never use reverse as the actual way of reaching the
-             * player.
-             */
-            if (
-                followTurnTicks >=
-                    FOLLOW_REVERSE_MAX_TICKS ||
-                absoluteError <=
-                    FOLLOW_REVERSE_TO_FORWARD_ANGLE
-            ) {
-
-                followTurnPhase =
-                    FOLLOW_TURN_FORWARD;
-
-                followTurnTicks = 0;
-            }
-
-            return;
-        }
-
-        if (
-            followTurnPhase ==
-                FOLLOW_TURN_FORWARD
-        ) {
-
-            followTurnTicks++;
-
-            boolean crossedTargetHeading =
-                Math.signum(
-                    headingError
-                ) !=
-                Math.signum(
-                    followTurnDirection
-                );
-
-            if (
-                absoluteError <=
-                    FOLLOW_TURN_FINISH_ANGLE ||
-                crossedTargetHeading ||
-                followTurnTicks >=
-                    FOLLOW_FORWARD_TURN_MAX_TICKS
-            ) {
-
-                followTurnPhase =
-                    FOLLOW_TURN_FOLLOW;
-
-                followTurnTicks = 0;
-                followTurnCooldownTicks =
-                    FOLLOW_TURN_COOLDOWN_TICKS;
-
-                steeringTarget =
-                    clamp(
-                        headingError *
-                            FOLLOW_STEERING_GAIN,
-                        -FOLLOW_TURN_STEERING,
-                        FOLLOW_TURN_STEERING
-                    );
-
-                throttleCommand = 0.10;
-                driveReverse = false;
-                driveForward = true;
-
-                return;
-            }
-
-            steeringTarget =
-                followTurnDirection *
-                FOLLOW_TURN_STEERING;
-
-            throttleCommand = 0.11;
-            driveReverse = false;
-            driveForward = true;
-
-            return;
-        }
-
+        /*
+         * Pure forward steering.
+         *
+         * The steering command is recalculated every tick from the
+         * CURRENT heading error.  If the car drifts past the target
+         * heading, the sign flips immediately and the controller
+         * counter-steers instead of continuing a 360-degree turn.
+         */
         steeringTarget =
             clamp(
                 headingError *
                     FOLLOW_STEERING_GAIN,
-                -FOLLOW_TURN_STEERING,
-                FOLLOW_TURN_STEERING
+                -AI_MAX_STEERING,
+                AI_MAX_STEERING
             );
 
-        /*
-         * Slow down when correcting a large angle and when getting
-         * close to the player.  This matters a lot on dirt where a
-         * full-lock turn at speed causes the MTS car to slide.
-         */
-        if (absoluteError > 55.0) {
+        if (absoluteError >= 90.0) {
 
-            throttleCommand = 0.11;
+            throttleCommand =
+                AI_HARD_TURN_THROTTLE;
 
         } else if (
-            absoluteError > 30.0
+            absoluteError >= 55.0
         ) {
 
-            throttleCommand = 0.17;
+            throttleCommand =
+                AI_MEDIUM_TURN_THROTTLE;
 
         } else if (
-            distance < 14.0
+            absoluteError >= 25.0
         ) {
 
-            throttleCommand = 0.16;
+            throttleCommand =
+                AI_LIGHT_TURN_THROTTLE;
 
         } else {
 
-            throttleCommand = 0.30;
+            throttleCommand =
+                AI_STRAIGHT_THROTTLE;
         }
 
+        /*
+         * Ease into the player rather than overshooting the stop
+         * distance.
+         */
         if (
-            distance < FOLLOW_RESUME_DISTANCE
+            distance <
+                FOLLOW_RESUME_DISTANCE + 4.0
         ) {
+
             throttleCommand =
                 Math.min(
                     throttleCommand,
-                    0.13
+                    0.14
                 );
         }
 
@@ -1700,8 +1605,12 @@ public class GTACore {
     ) throws Exception {
 
         if (homeTrail.isEmpty()) {
+
             returningHome = false;
             driveForward = false;
+            driveReverse = false;
+            steeringTarget = 0.0;
+
             return;
         }
 
@@ -1732,8 +1641,8 @@ public class GTACore {
             );
 
         /*
-         * When we reach a breadcrumb, move to the previous one.
-         * Index 0 is the actual home position.
+         * Progress backward through the recorded route as each
+         * breadcrumb is reached.
          */
         while (
             homeRouteIndex > 0 &&
@@ -1770,20 +1679,20 @@ public class GTACore {
         ) {
 
             returningHome = false;
-            homeTurnPhase = HOME_TURN_FOLLOW;
+
+            homeTurnPhase =
+                HOME_TURN_FOLLOW;
+
             homeTurnDirection = 1.0;
             homeTurnTicks = 0;
             homeTurnCooldownTicks = 0;
+
             driveForward = false;
             driveReverse = false;
             throttleCommand = 1.0;
             steeringTarget = 0.0;
             homeRouteIndex = -1;
 
-            /*
-             * We are back at the station.  Start a fresh outbound
-             * trail the next time this car leaves.
-             */
             homeTrail.clear();
             homeTrail.add(
                 new HomeWaypoint(
@@ -1801,10 +1710,9 @@ public class GTACore {
         }
 
         /*
-         * Pure-pursuit style look-ahead:
-         * do not aim at every breadcrumb individually.  Pick a point
-         * farther down the recorded route so the car chooses one
-         * smooth arc instead of zig-zagging point-to-point.
+         * Aim farther down the breadcrumb trail rather than at the
+         * closest point.  This gives the car one smooth direction to
+         * follow through bends.
          */
         HomeWaypoint steeringTargetPoint =
             chooseHomeLookahead(
@@ -1832,167 +1740,41 @@ public class GTACore {
             );
 
         /*
-         * Begin ONE deliberate turnaround if the return route starts
-         * mostly behind the vehicle.
-         */
-        if (homeTurnCooldownTicks > 0) {
-            homeTurnCooldownTicks--;
-        }
-
-        if (
-            homeTurnPhase ==
-                HOME_TURN_FOLLOW &&
-            homeTurnCooldownTicks == 0 &&
-            absoluteError >=
-                HOME_TURN_START_ANGLE
-        ) {
-
-            homeTurnPhase =
-                HOME_TURN_REVERSE;
-
-            homeTurnTicks = 0;
-
-            /*
-             * At almost exactly 180 degrees, left/right is
-             * mathematically ambiguous.  Pick right consistently.
-             */
-            homeTurnDirection =
-                Math.abs(headingError) > 175.0
-                    ? 1.0
-                    : Math.copySign(
-                        1.0,
-                        headingError
-                    );
-        }
-
-        if (
-            homeTurnPhase ==
-                HOME_TURN_REVERSE
-        ) {
-
-            homeTurnTicks++;
-
-            steeringTarget =
-                -homeTurnDirection *
-                HOME_TURN_STEERING;
-
-            throttleCommand = 0.10;
-            driveForward = false;
-            driveReverse = true;
-
-            if (
-                homeTurnTicks >=
-                    HOME_REVERSE_MAX_TICKS ||
-                absoluteError <=
-                    HOME_REVERSE_TO_FORWARD_ANGLE
-            ) {
-
-                homeTurnPhase =
-                    HOME_TURN_FORWARD;
-
-                homeTurnTicks = 0;
-            }
-
-            return;
-        }
-
-        if (
-            homeTurnPhase ==
-                HOME_TURN_FORWARD
-        ) {
-
-            homeTurnTicks++;
-
-            /*
-             * Complete the turn going forward, but DO NOT keep
-             * holding the original steering direction after the
-             * nose crosses the desired path.
-             *
-             * On low-grip surfaces the old version would drift past
-             * the target heading, keep steering right, and perform a
-             * full 360-degree circle.  As soon as the heading error
-             * changes sign, hand control back to the proportional
-             * route follower so it can counter-steer.
-             */
-            boolean crossedTargetHeading =
-                Math.signum(
-                    headingError
-                ) !=
-                Math.signum(
-                    homeTurnDirection
-                );
-
-            if (
-                absoluteError <=
-                    HOME_TURN_FINISH_ANGLE ||
-                crossedTargetHeading ||
-                homeTurnTicks >=
-                    HOME_FORWARD_TURN_MAX_TICKS
-            ) {
-
-                homeTurnPhase =
-                    HOME_TURN_FOLLOW;
-
-                homeTurnTicks = 0;
-                homeTurnCooldownTicks =
-                    HOME_TURN_COOLDOWN_TICKS;
-
-                steeringTarget =
-                    clamp(
-                        headingError *
-                            HOME_STEERING_GAIN,
-                        -HOME_TURN_STEERING,
-                        HOME_TURN_STEERING
-                    );
-
-                throttleCommand = 0.10;
-                driveReverse = false;
-                driveForward = true;
-
-                return;
-            }
-
-            steeringTarget =
-                homeTurnDirection *
-                HOME_TURN_STEERING;
-
-            throttleCommand = 0.11;
-            driveReverse = false;
-            driveForward = true;
-
-            return;
-        }
-
-        /*
-         * Normal route following after the nose is aligned.
+         * Forward only.  No turnaround state machine and no reverse.
+         * Counter-steering happens naturally because headingError is
+         * recalculated each tick.
          */
         steeringTarget =
             clamp(
                 headingError *
                     HOME_STEERING_GAIN,
-                -HOME_TURN_STEERING,
-                HOME_TURN_STEERING
+                -AI_MAX_STEERING,
+                AI_MAX_STEERING
             );
 
-        if (absoluteError > 65.0) {
+        if (absoluteError >= 90.0) {
 
-            throttleCommand = 0.12;
-
-        } else if (
-            absoluteError > 35.0
-        ) {
-
-            throttleCommand = 0.18;
+            throttleCommand =
+                AI_HARD_TURN_THROTTLE;
 
         } else if (
-            absoluteError > 18.0
+            absoluteError >= 55.0
         ) {
 
-            throttleCommand = 0.24;
+            throttleCommand =
+                AI_MEDIUM_TURN_THROTTLE;
+
+        } else if (
+            absoluteError >= 25.0
+        ) {
+
+            throttleCommand =
+                AI_LIGHT_TURN_THROTTLE;
 
         } else {
 
-            throttleCommand = 0.32;
+            throttleCommand =
+                AI_STRAIGHT_THROTTLE;
         }
 
         if (
@@ -2003,7 +1785,7 @@ public class GTACore {
             throttleCommand =
                 Math.min(
                     throttleCommand,
-                    0.16
+                    0.13
                 );
         }
 
@@ -2798,8 +2580,7 @@ public class GTACore {
             () -> Component.literal(
                 "Returning home: "
                     + returningHome
-                    + " | turn phase: "
-                    + homeTurnPhase
+                    + " | AI mode: forward-only"
             ),
             false
         );
@@ -2808,10 +2589,7 @@ public class GTACore {
             () -> Component.literal(
                 "Following: "
                     + (followTargetId != null)
-                    + " | follow turn phase: "
-                    + followTurnPhase
-                    + " | cooldown: "
-                    + followTurnCooldownTicks
+                    + " | AI mode: forward-only"
             ),
             false
         );
