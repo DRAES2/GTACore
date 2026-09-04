@@ -18,7 +18,9 @@ import net.minecraftforge.fml.common.Mod;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
 
 @Mod(GTACore.MOD_ID)
@@ -34,6 +36,27 @@ public class GTACore {
      * driveForward = our virtual W key.
      */
     private static boolean driveForward = false;
+
+    // ============================================================
+    // SERVICE VEHICLE SYSTEM
+    // ============================================================
+
+    /*
+     * Vehicles registered here are GTACore-managed service vehicles.
+     *
+     * For now:
+     * - fuel is automatically kept full
+     *
+     * Later this system will also handle:
+     * - police vehicle templates
+     * - automatic spawning
+     * - NPC assignment
+     * - station dispatch
+     */
+    private static final Set<UUID> serviceVehicles =
+        new HashSet<>();
+
+    private static int serviceFuelTickCounter = 0;
 
     public GTACore() {
         MinecraftForge.EVENT_BUS.register(this);
@@ -312,6 +335,89 @@ public class GTACore {
                 )
 
                 // ------------------------------------------------
+                // /gta service
+                //
+                // Marks the selected MTS vehicle as a GTACore
+                // service vehicle and keeps its fuel tank full.
+                // ------------------------------------------------
+                .then(
+                    Commands.literal("service")
+                        .executes(context -> {
+
+                            if (selectedCar == null) {
+
+                                context.getSource()
+                                    .sendFailure(
+                                        Component.literal(
+                                            "Select a car first with /gta carselect"
+                                        )
+                                    );
+
+                                return 0;
+                            }
+
+                            try {
+
+                                Object vehicle =
+                                    getSelectedVehicle(
+                                        context
+                                            .getSource()
+                                            .getServer()
+                                    );
+
+                                if (vehicle == null) {
+
+                                    context.getSource()
+                                        .sendFailure(
+                                            Component.literal(
+                                                "Selected MTS car is not loaded."
+                                            )
+                                        );
+
+                                    return 0;
+                                }
+
+                                /*
+                                 * We intentionally require the vehicle
+                                 * to already contain fuel the first time.
+                                 *
+                                 * This lets GTACore learn the correct
+                                 * MTS fuel type for that particular car.
+                                 */
+                                refillServiceFuel(vehicle);
+
+                                serviceVehicles.add(
+                                    selectedCar
+                                );
+
+                                context.getSource()
+                                    .sendSuccess(
+                                        () ->
+                                            Component.literal(
+                                                "Service vehicle enabled. Fuel will remain full."
+                                            ),
+                                        false
+                                    );
+
+                            } catch (Exception e) {
+
+                                e.printStackTrace();
+
+                                context.getSource()
+                                    .sendFailure(
+                                        Component.literal(
+                                            "Could not enable service vehicle. Make sure the car currently has fuel."
+                                        )
+                                    );
+
+                                return 0;
+                            }
+
+                            return Command.SINGLE_SUCCESS;
+                        })
+                )
+
+                // ------------------------------------------------
                 // /gta status
                 // ------------------------------------------------
                 .then(
@@ -390,6 +496,23 @@ public class GTACore {
             TickEvent.Phase.END
         ) {
             return;
+        }
+
+        /*
+         * MTS runs at 20 ticks/second.
+         *
+         * Service vehicles do not need their fuel checked every
+         * single tick, so we maintain them once per second.
+         */
+        serviceFuelTickCounter++;
+
+        if (serviceFuelTickCounter >= 20) {
+
+            serviceFuelTickCounter = 0;
+
+            maintainServiceVehicles(
+                event.getServer()
+            );
         }
 
         if (selectedCar == null) {
@@ -499,6 +622,191 @@ public class GTACore {
 
             e.printStackTrace();
         }
+    }
+
+    // ============================================================
+    // SERVICE VEHICLES
+    // ============================================================
+
+    private static void maintainServiceVehicles(
+        MinecraftServer server
+    ) {
+
+        /*
+         * Copy the set before iterating it so future dispatch code
+         * can safely add/remove vehicles without causing a
+         * ConcurrentModificationException.
+         */
+        for (
+            UUID vehicleId :
+            new HashSet<>(serviceVehicles)
+        ) {
+
+            try {
+
+                Object vehicle =
+                    getVehicleByUUID(
+                        server,
+                        vehicleId
+                    );
+
+                if (vehicle == null) {
+                    continue;
+                }
+
+                refillServiceFuel(vehicle);
+
+            } catch (Exception e) {
+
+                System.err.println(
+                    "[GTACore] Could not maintain service vehicle "
+                        + vehicleId
+                );
+
+                e.printStackTrace();
+            }
+        }
+    }
+
+    private static void refillServiceFuel(
+        Object vehicle
+    ) throws Exception {
+
+        Object fuelTank =
+            getFieldValue(
+                vehicle,
+                "fuelTank"
+            );
+
+        if (fuelTank == null) {
+
+            throw new IllegalStateException(
+                "MTS vehicle has no fuelTank."
+            );
+        }
+
+        Method getFluidLevel =
+            fuelTank
+                .getClass()
+                .getMethod(
+                    "getFluidLevel"
+                );
+
+        Method getMaxLevel =
+            fuelTank
+                .getClass()
+                .getMethod(
+                    "getMaxLevel"
+                );
+
+        Method getFluid =
+            fuelTank
+                .getClass()
+                .getMethod(
+                    "getFluid"
+                );
+
+        Method getFluidMod =
+            fuelTank
+                .getClass()
+                .getMethod(
+                    "getFluidMod"
+                );
+
+        double currentLevel =
+            ((Number)
+                getFluidLevel.invoke(
+                    fuelTank
+                )
+            ).doubleValue();
+
+        double maxLevel =
+            ((Number)
+                getMaxLevel.invoke(
+                    fuelTank
+                )
+            ).doubleValue();
+
+        String fluid =
+            (String)
+                getFluid.invoke(
+                    fuelTank
+                );
+
+        String fluidMod =
+            (String)
+                getFluidMod.invoke(
+                    fuelTank
+                );
+
+        /*
+         * The first version of this system learns the fuel type
+         * from an already-fueled vehicle.
+         *
+         * Once we add the police vehicle template factory,
+         * spawned cruisers will already contain their correct fuel.
+         */
+        if (
+            fluid == null ||
+            fluid.isEmpty()
+        ) {
+
+            throw new IllegalStateException(
+                "Fuel tank is empty, so GTACore cannot determine the correct fuel type."
+            );
+        }
+
+        double missingFuel =
+            maxLevel - currentLevel;
+
+        if (missingFuel <= 0.001) {
+            return;
+        }
+
+        Method fill =
+            fuelTank
+                .getClass()
+                .getMethod(
+                    "fill",
+                    String.class,
+                    String.class,
+                    double.class,
+                    boolean.class
+                );
+
+        fill.invoke(
+            fuelTank,
+            fluid,
+            fluidMod,
+            missingFuel,
+            true
+        );
+    }
+
+    private static Object getVehicleByUUID(
+        MinecraftServer server,
+        UUID vehicleId
+    ) throws Exception {
+
+        for (
+            ServerLevel level :
+            server.getAllLevels()
+        ) {
+
+            Entity wrapper =
+                level.getEntity(
+                    vehicleId
+                );
+
+            if (wrapper != null) {
+
+                return getInternalMTSEntity(
+                    wrapper
+                );
+            }
+        }
+
+        return null;
     }
 
     // ============================================================
