@@ -37,6 +37,22 @@ public class GTACore {
      */
     private static boolean driveForward = false;
 
+    /*
+     * Steering is expressed in MTS rudder-input degrees.
+     *
+     * MTS ground vehicles use rudderInputVar for steering and
+     * normally clamp it to +/-45 degrees.
+     *
+     * We keep a target plus a smoothed current value so later AI
+     * navigation can steer progressively rather than snapping the
+     * wheels instantly from lock to lock.
+     */
+    private static final double MAX_STEERING_INPUT = 45.0;
+    private static final double STEERING_STEP_PER_TICK = 2.5;
+
+    private static double steeringTarget = 0.0;
+    private static double steeringCurrent = 0.0;
+
     // ============================================================
     // SERVICE VEHICLE SYSTEM
     // ============================================================
@@ -188,6 +204,8 @@ public class GTACore {
                                     .getUUID();
 
                             driveForward = false;
+                            steeringTarget = 0.0;
+                            steeringCurrent = 0.0;
 
                             context.getSource()
                                 .sendSuccess(
@@ -303,6 +321,101 @@ public class GTACore {
                                         Component.literal(
                                             "Virtual W: ON"
                                         ),
+                                    false
+                                );
+
+                            return Command.SINGLE_SUCCESS;
+                        })
+                )
+
+                // ------------------------------------------------
+                // /gta left
+                // /gta right
+                // /gta straight
+                //
+                // Manual steering tests.  These set a steering
+                // target; the tick loop smoothly moves the MTS
+                // rudder input toward that target.
+                // ------------------------------------------------
+                .then(
+                    Commands.literal("left")
+                        .executes(context -> {
+
+                            if (selectedCar == null) {
+                                context.getSource()
+                                    .sendFailure(
+                                        Component.literal(
+                                            "Select a car first."
+                                        )
+                                    );
+                                return 0;
+                            }
+
+                            steeringTarget =
+                                -MAX_STEERING_INPUT;
+
+                            context.getSource()
+                                .sendSuccess(
+                                    () -> Component.literal(
+                                        "Steering target: LEFT"
+                                    ),
+                                    false
+                                );
+
+                            return Command.SINGLE_SUCCESS;
+                        })
+                )
+
+                .then(
+                    Commands.literal("right")
+                        .executes(context -> {
+
+                            if (selectedCar == null) {
+                                context.getSource()
+                                    .sendFailure(
+                                        Component.literal(
+                                            "Select a car first."
+                                        )
+                                    );
+                                return 0;
+                            }
+
+                            steeringTarget =
+                                MAX_STEERING_INPUT;
+
+                            context.getSource()
+                                .sendSuccess(
+                                    () -> Component.literal(
+                                        "Steering target: RIGHT"
+                                    ),
+                                    false
+                                );
+
+                            return Command.SINGLE_SUCCESS;
+                        })
+                )
+
+                .then(
+                    Commands.literal("straight")
+                        .executes(context -> {
+
+                            if (selectedCar == null) {
+                                context.getSource()
+                                    .sendFailure(
+                                        Component.literal(
+                                            "Select a car first."
+                                        )
+                                    );
+                                return 0;
+                            }
+
+                            steeringTarget = 0.0;
+
+                            context.getSource()
+                                .sendSuccess(
+                                    () -> Component.literal(
+                                        "Steering target: STRAIGHT"
+                                    ),
                                     false
                                 );
 
@@ -530,6 +643,8 @@ public class GTACore {
                 return;
             }
 
+            updateSteering(vehicle);
+
             if (driveForward) {
 
                 /*
@@ -622,6 +737,46 @@ public class GTACore {
 
             e.printStackTrace();
         }
+    }
+
+    // ============================================================
+    // STEERING
+    // ============================================================
+
+    private static void updateSteering(
+        Object vehicle
+    ) throws Exception {
+
+        double difference =
+            steeringTarget -
+            steeringCurrent;
+
+        if (
+            Math.abs(difference) <=
+            STEERING_STEP_PER_TICK
+        ) {
+
+            steeringCurrent =
+                steeringTarget;
+
+        } else {
+
+            steeringCurrent +=
+                Math.copySign(
+                    STEERING_STEP_PER_TICK,
+                    difference
+                );
+        }
+
+        /*
+         * This is the same MTS variable used by normal
+         * ground-vehicle steering controls.
+         */
+        setMTSVariable(
+            vehicle,
+            "rudderInputVar",
+            steeringCurrent
+        );
     }
 
     // ============================================================
@@ -957,6 +1112,12 @@ public class GTACore {
                 "parkingBrakeVar"
             );
 
+        double steering =
+            getMTSVariableValue(
+                vehicle,
+                "rudderInputVar"
+            );
+
         boolean enginesRunning =
             getBooleanField(
                 vehicle,
@@ -1050,6 +1211,16 @@ public class GTACore {
             () -> Component.literal(
                 "Parking brake: "
                     + parkingBrake
+            ),
+            false
+        );
+
+        source.sendSuccess(
+            () -> Component.literal(
+                "Steering: "
+                    + steering
+                    + " / target "
+                    + steeringTarget
             ),
             false
         );
