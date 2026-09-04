@@ -1881,21 +1881,33 @@ public class GTACore {
             );
 
         /*
-         * MTS uses local +Z as the vehicle's forward vector.
-         * For a rotation matrix, the transformed +Z vector is
-         * matrix column 2: (m02, m12, m22).
+         * Read the vehicle orientation directly from its rotation
+         * matrix rather than relying on Euler yaw conversion.
          *
-         * Reading this vector directly avoids relying on Euler yaw
-         * conversion and its sign/convention edge cases.
+         * For this MTS vehicle setup, the physical nose points along
+         * local -Z, so the matrix +Z column is negated below.
+         */
+        /*
+         * Important MTS orientation detail for the vehicle pack we
+         * are testing: the matrix's local +Z axis points opposite
+         * the car's physical driving direction.
+         *
+         * The previous controller treated +Z as the nose of the car,
+         * which made follow/home consistently choose the direction
+         * 180 degrees away from the target.
+         *
+         * Negate the matrix forward axis so the AI heading matches
+         * the direction the car actually drives when throttle is
+         * applied.
          */
         double forwardX =
-            getDoubleField(
+            -getDoubleField(
                 orientation,
                 "m02"
             );
 
         double forwardZ =
-            getDoubleField(
+            -getDoubleField(
                 orientation,
                 "m22"
             );
