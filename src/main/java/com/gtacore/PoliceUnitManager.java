@@ -260,6 +260,20 @@ public final class PoliceUnitManager {
 
         int transmissionTickCounter;
 
+        /*
+         * Global road-path state.  This sits ABOVE the normal steering
+         * controller: the pathfinder chooses a waypoint, then GTACore's
+         * existing steering code drives toward that waypoint.
+         */
+        final List<Integer> roadRoute =
+            new ArrayList<>();
+
+        int roadRouteIndex;
+        int roadRepathTicks;
+        int roadStartNodeId;
+        int roadDestinationNodeId;
+        boolean roadUsingPath;
+
         DriveState() {
             reset();
         }
@@ -299,6 +313,13 @@ public final class PoliceUnitManager {
             steeringTapDirection = 0.0;
 
             transmissionTickCounter = 0;
+
+            roadRoute.clear();
+            roadRouteIndex = 0;
+            roadRepathTicks = 0;
+            roadStartNodeId = -1;
+            roadDestinationNodeId = -1;
+            roadUsingPath = false;
         }
     }
 }
