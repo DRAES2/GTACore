@@ -1074,6 +1074,558 @@ public class GTACore {
         return Command.SINGLE_SUCCESS;
     }
 
+    private static String getDimensionId(
+        Entity entity
+    ) {
+
+        return entity.level()
+            .dimension()
+            .location()
+            .toString();
+    }
+
+    private static int startRoadRecording(
+        CommandSourceStack source
+    ) {
+
+        try {
+
+            ServerPlayer player =
+                source.getPlayerOrException();
+
+            RoadNetworkStore roads =
+                RoadNetworkStore.get();
+
+            String dimension =
+                getDimensionId(
+                    player
+                );
+
+            RoadNetworkStore.RoadNode start =
+                roads.findNearestNode(
+                    dimension,
+                    player.getX(),
+                    player.getY(),
+                    player.getZ(),
+                    ROAD_RECORD_SNAP_DISTANCE
+                );
+
+            if (start == null) {
+
+                start =
+                    roads.addNode(
+                        dimension,
+                        player.getX(),
+                        player.getY(),
+                        player.getZ()
+                    );
+
+                roads.save();
+            }
+
+            roadRecordingPlayerId =
+                player.getUUID();
+
+            roadRecordingLastNodeId =
+                start.id;
+
+            roadRecordingLastX =
+                player.getX();
+
+            roadRecordingLastY =
+                player.getY();
+
+            roadRecordingLastZ =
+                player.getZ();
+
+            final int startId =
+                start.id;
+
+            source.sendSuccess(
+                () ->
+                    Component.literal(
+                        "Road recording started at node "
+                            + startId
+                            + ". Move along the center of the road; nodes auto-record every ~"
+                            + ROAD_RECORD_SPACING
+                            + " blocks."
+                    ),
+                false
+            );
+
+            return Command.SINGLE_SUCCESS;
+
+        } catch (Exception e) {
+
+            e.printStackTrace();
+
+            source.sendFailure(
+                Component.literal(
+                    "Could not start road recording: "
+                        + e.getMessage()
+                )
+            );
+
+            return 0;
+        }
+    }
+
+    private static int stopRoadRecording(
+        CommandSourceStack source
+    ) {
+
+        if (
+            roadRecordingPlayerId == null
+        ) {
+
+            source.sendFailure(
+                Component.literal(
+                    "Road recording is not active."
+                )
+            );
+
+            return 0;
+        }
+
+        try {
+
+            RoadNetworkStore.get()
+                .save();
+
+        } catch (Exception e) {
+
+            e.printStackTrace();
+        }
+
+        roadRecordingPlayerId = null;
+        roadRecordingLastNodeId = null;
+
+        RoadNetworkStore roads =
+            RoadNetworkStore.get();
+
+        source.sendSuccess(
+            () ->
+                Component.literal(
+                    "Road recording stopped. Network now has "
+                        + roads.size()
+                        + " nodes and "
+                        + roads.connectionCount()
+                        + " connections."
+                ),
+            false
+        );
+
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static int addRoadNode(
+        CommandSourceStack source
+    ) {
+
+        try {
+
+            ServerPlayer player =
+                source.getPlayerOrException();
+
+            RoadNetworkStore roads =
+                RoadNetworkStore.get();
+
+            String dimension =
+                getDimensionId(
+                    player
+                );
+
+            RoadNetworkStore.RoadNode existing =
+                roads.findNearestNode(
+                    dimension,
+                    player.getX(),
+                    player.getY(),
+                    player.getZ(),
+                    1.5
+                );
+
+            if (existing != null) {
+
+                final int existingId =
+                    existing.id;
+
+                source.sendSuccess(
+                    () ->
+                        Component.literal(
+                            "Already near road node "
+                                + existingId
+                                + "."
+                        ),
+                    false
+                );
+
+                return Command.SINGLE_SUCCESS;
+            }
+
+            RoadNetworkStore.RoadNode node =
+                roads.addNode(
+                    dimension,
+                    player.getX(),
+                    player.getY(),
+                    player.getZ()
+                );
+
+            roads.save();
+
+            final int nodeId =
+                node.id;
+
+            source.sendSuccess(
+                () ->
+                    Component.literal(
+                        "Added road node "
+                            + nodeId
+                            + "."
+                    ),
+                false
+            );
+
+            return Command.SINGLE_SUCCESS;
+
+        } catch (Exception e) {
+
+            e.printStackTrace();
+
+            source.sendFailure(
+                Component.literal(
+                    "Could not add road node: "
+                        + e.getMessage()
+                )
+            );
+
+            return 0;
+        }
+    }
+
+    private static int connectRoadNodes(
+        CommandSourceStack source,
+        int nodeA,
+        int nodeB
+    ) {
+
+        try {
+
+            RoadNetworkStore roads =
+                RoadNetworkStore.get();
+
+            if (
+                !roads.connect(
+                    nodeA,
+                    nodeB
+                )
+            ) {
+
+                source.sendFailure(
+                    Component.literal(
+                        "Could not connect road nodes "
+                            + nodeA
+                            + " and "
+                            + nodeB
+                            + ". Check that both exist in the same dimension."
+                    )
+                );
+
+                return 0;
+            }
+
+            roads.save();
+
+            source.sendSuccess(
+                () ->
+                    Component.literal(
+                        "Connected road nodes "
+                            + nodeA
+                            + " <-> "
+                            + nodeB
+                            + "."
+                    ),
+                false
+            );
+
+            return Command.SINGLE_SUCCESS;
+
+        } catch (Exception e) {
+
+            e.printStackTrace();
+
+            source.sendFailure(
+                Component.literal(
+                    "Could not save road connection: "
+                        + e.getMessage()
+                )
+            );
+
+            return 0;
+        }
+    }
+
+    private static int showNearestRoadNode(
+        CommandSourceStack source
+    ) {
+
+        try {
+
+            ServerPlayer player =
+                source.getPlayerOrException();
+
+            RoadNetworkStore.RoadNode node =
+                RoadNetworkStore.get()
+                    .findNearestNode(
+                        getDimensionId(
+                            player
+                        ),
+                        player.getX(),
+                        player.getY(),
+                        player.getZ(),
+                        1000.0
+                    );
+
+            if (node == null) {
+
+                source.sendFailure(
+                    Component.literal(
+                        "No road nodes exist in this dimension."
+                    )
+                );
+
+                return 0;
+            }
+
+            double distance =
+                node.horizontalDistanceTo(
+                    player.getX(),
+                    player.getZ()
+                );
+
+            final int id =
+                node.id;
+
+            final double finalDistance =
+                distance;
+
+            source.sendSuccess(
+                () ->
+                    Component.literal(
+                        "Nearest road node: "
+                            + id
+                            + " | distance="
+                            + String.format(
+                                "%.1f",
+                                finalDistance
+                            )
+                    ),
+                false
+            );
+
+            return Command.SINGLE_SUCCESS;
+
+        } catch (Exception e) {
+
+            source.sendFailure(
+                Component.literal(
+                    "Could not inspect road network."
+                )
+            );
+
+            return 0;
+        }
+    }
+
+    private static int showRoadStats(
+        CommandSourceStack source
+    ) {
+
+        RoadNetworkStore roads =
+            RoadNetworkStore.get();
+
+        source.sendSuccess(
+            () ->
+                Component.literal(
+                    "Road network: "
+                        + roads.size()
+                        + " nodes | "
+                        + roads.connectionCount()
+                        + " connections | file="
+                        + roads.getRoadFile()
+                            .toString()
+                ),
+            false
+        );
+
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static int clearRoadNetwork(
+        CommandSourceStack source
+    ) {
+
+        try {
+
+            RoadNetworkStore roads =
+                RoadNetworkStore.get();
+
+            roads.clear();
+            roads.save();
+
+            roadRecordingPlayerId = null;
+            roadRecordingLastNodeId = null;
+
+            for (
+                PoliceUnitManager.ManagedUnit managed :
+                policeUnitManager.getUnits()
+            ) {
+
+                managed.getDrive()
+                    .roadRoute
+                    .clear();
+
+                managed.getDrive()
+                    .roadUsingPath =
+                        false;
+            }
+
+            source.sendSuccess(
+                () ->
+                    Component.literal(
+                        "Road network cleared."
+                    ),
+                false
+            );
+
+            return Command.SINGLE_SUCCESS;
+
+        } catch (Exception e) {
+
+            e.printStackTrace();
+
+            source.sendFailure(
+                Component.literal(
+                    "Could not clear road network: "
+                        + e.getMessage()
+                )
+            );
+
+            return 0;
+        }
+    }
+
+    private static void tickRoadRecorder(
+        MinecraftServer server
+    ) {
+
+        if (
+            roadRecordingPlayerId == null
+        ) {
+            return;
+        }
+
+        ServerPlayer player =
+            server.getPlayerList()
+                .getPlayer(
+                    roadRecordingPlayerId
+                );
+
+        if (player == null) {
+            return;
+        }
+
+        double dx =
+            player.getX() -
+            roadRecordingLastX;
+
+        double dy =
+            player.getY() -
+            roadRecordingLastY;
+
+        double dz =
+            player.getZ() -
+            roadRecordingLastZ;
+
+        double distance =
+            Math.sqrt(
+                dx * dx +
+                dy * dy +
+                dz * dz
+            );
+
+        if (
+            distance <
+                ROAD_RECORD_SPACING
+        ) {
+            return;
+        }
+
+        try {
+
+            RoadNetworkStore roads =
+                RoadNetworkStore.get();
+
+            String dimension =
+                getDimensionId(
+                    player
+                );
+
+            RoadNetworkStore.RoadNode node =
+                roads.findNearestNode(
+                    dimension,
+                    player.getX(),
+                    player.getY(),
+                    player.getZ(),
+                    ROAD_RECORD_SNAP_DISTANCE
+                );
+
+            if (node == null) {
+
+                node =
+                    roads.addNode(
+                        dimension,
+                        player.getX(),
+                        player.getY(),
+                        player.getZ()
+                    );
+            }
+
+            if (
+                roadRecordingLastNodeId != null &&
+                roadRecordingLastNodeId !=
+                    node.id
+            ) {
+
+                roads.connect(
+                    roadRecordingLastNodeId,
+                    node.id
+                );
+            }
+
+            roadRecordingLastNodeId =
+                node.id;
+
+            roadRecordingLastX =
+                player.getX();
+
+            roadRecordingLastY =
+                player.getY();
+
+            roadRecordingLastZ =
+                player.getZ();
+
+            roads.save();
+
+        } catch (Exception e) {
+
+            System.err.println(
+                "[GTACore] Road recorder failed:"
+            );
+
+            e.printStackTrace();
+        }
+    }
+
     // ============================================================
     // COMMANDS
     // ============================================================
