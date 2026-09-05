@@ -262,30 +262,11 @@ public class GTACore {
     private static final double FOLLOW_HARD_TURN_ERROR_GROWTH_DEGREES = 1.0;
     private static final int FOLLOW_HARD_TURN_GROWTH_CONFIRM_TICKS = 3;
 
-    /*
-     * Pass-through / overshoot recovery.
-     *
-     * If the target suddenly ends up mostly behind the cruiser
-     * (jumping over it, crossing directly through its path, or a
-     * cruiser overshooting), immediately enter a hard turn instead of
-     * waiting for speed or error-growth confirmation.
-     */
-    private static final double FOLLOW_BEHIND_RECOVERY_DEGREES = 135.0;
-
-    /*
-     * Signed heading error wraps at +/-180 degrees.  A sign change
-     * around that boundary is NOT the same as crossing the target
-     * heading.  Only count a sign change as a true crossover when the
-     * remaining error is already fairly small.
-     */
-    private static final double FOLLOW_CROSSOVER_MAX_ERROR_DEGREES = 60.0;
-
     private static boolean followHardTurnActive = false;
     private static boolean followHardTurnCatchup = false;
     private static int followHardTurnConfirmTicks = 0;
     private static int followHardTurnGrowthTicks = 0;
     private static double followPreviousAbsoluteError = 0.0;
-    private static double followPreviousHeadingError = 0.0;
 
 
     /*
@@ -459,7 +440,6 @@ public class GTACore {
         followHardTurnConfirmTicks = 0;
         followHardTurnGrowthTicks = 0;
         followPreviousAbsoluteError = 0.0;
-        followPreviousHeadingError = 0.0;
         parkingBrakeCommand = 0.0;
     }
 
@@ -2902,9 +2882,6 @@ public class GTACore {
         state.followPreviousAbsoluteError =
             followPreviousAbsoluteError;
 
-        state.followPreviousHeadingError =
-            followPreviousHeadingError;
-
         state.aiTargetSpeed =
             aiTargetSpeed;
 
@@ -2934,7 +2911,6 @@ public class GTACore {
 
         state.transmissionTickCounter =
             transmissionTickCounter;
-
     }
 
     private static void loadPoliceDriveState(
@@ -2983,9 +2959,6 @@ public class GTACore {
         followPreviousAbsoluteError =
             state.followPreviousAbsoluteError;
 
-        followPreviousHeadingError =
-            state.followPreviousHeadingError;
-
         aiTargetSpeed =
             state.aiTargetSpeed;
 
@@ -3015,7 +2988,6 @@ public class GTACore {
 
         transmissionTickCounter =
             state.transmissionTickCounter;
-
     }
 
     // ============================================================
@@ -3133,52 +3105,16 @@ public class GTACore {
             );
 
         /*
-         * TRUE heading crossover detection.
-         *
-         * atan2 wraps from +180 to -180 when the target passes behind
-         * the cruiser.  Comparing the current sign to a latched turn
-         * direction mistakes that wrap for "we crossed the target".
-         *
-         * Instead compare the CURRENT signed error to the PREVIOUS
-         * tick's signed error, and only accept a sign change near zero.
-         */
-        double previousSignedError =
-            followPreviousHeadingError;
-
-        boolean crossedTargetHeading =
-            previousSignedError != 0.0 &&
-            Math.signum(
-                previousSignedError
-            ) !=
-                Math.signum(
-                    followHeadingError
-                ) &&
-            Math.abs(
-                previousSignedError
-            ) <=
-                FOLLOW_CROSSOVER_MAX_ERROR_DEGREES &&
-            absoluteError <=
-                FOLLOW_CROSSOVER_MAX_ERROR_DEGREES;
-
-        followPreviousHeadingError =
-            followHeadingError;
-
-        /*
          * Detect a turn that normal tap-steering cannot physically make.
          *
          * Two ways to enter:
          *
-         * 1) Behind recovery: target is 135+ degrees behind -> immediate.
-         * 2) Classic hard turn: target reaches 85+ degrees at speed.
-         * 3) Catch-up turn: target is already 45+ degrees off and the
+         * 1) Classic hard turn: target reaches 85+ degrees.
+         * 2) Catch-up turn: target is already 45+ degrees off and the
          *    error keeps GROWING, meaning the player is turning away
          *    faster than our normal steering can catch up.
          */
         if (!followHardTurnActive) {
-
-            boolean behindRecovery =
-                absoluteError >=
-                    FOLLOW_BEHIND_RECOVERY_DEGREES;
 
             boolean classicHardTurn =
                 absoluteError >=
@@ -3222,15 +3158,13 @@ public class GTACore {
                     FOLLOW_HARD_TURN_GROWTH_CONFIRM_TICKS;
 
             if (
-                behindRecovery ||
                 classicConfirmed ||
                 catchupConfirmed
             ) {
 
                 followHardTurnActive = true;
                 followHardTurnCatchup =
-                    catchupConfirmed ||
-                    behindRecovery;
+                    catchupConfirmed;
 
                 followHardTurnConfirmTicks = 0;
                 followHardTurnGrowthTicks = 0;
@@ -3269,6 +3203,12 @@ public class GTACore {
                 vehicle,
                 followTurnDirection
             );
+
+            boolean crossedTargetHeading =
+                Math.signum(
+                    followHeadingError
+                ) !=
+                    followTurnDirection;
 
             if (crossedTargetHeading) {
 
@@ -3476,6 +3416,12 @@ public class GTACore {
          * target.  If the nose crosses that direction, STOP steering
          * rather than instantly commanding the opposite side.
          */
+        boolean crossedTargetHeading =
+            Math.signum(
+                followHeadingError
+            ) !=
+                followTurnDirection;
+
         if (
             absoluteError <=
                 FOLLOW_ALIGN_DONE_DEGREES ||
