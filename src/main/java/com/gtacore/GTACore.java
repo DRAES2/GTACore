@@ -2363,7 +2363,14 @@ public class GTACore {
              */
             if (
                 wantedLevel > 0 &&
-                wantedTargetId != null
+                wantedTargetId != null &&
+                (
+                    processingManagedPoliceUnit ||
+                    policeUnitManager
+                        .isVehicleInActivePursuit(
+                            selectedCar
+                        )
+                )
             ) {
 
                 setEmergencyVariableEverywhere(
