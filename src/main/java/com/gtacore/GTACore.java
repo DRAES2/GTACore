@@ -618,6 +618,15 @@ public class GTACore {
                 selectedCar
             );
 
+            PoliceUnitManager.ManagedUnit managedUnit =
+                policeUnitManager.registerVehicle(
+                    selectedCar,
+                    templateName
+                );
+
+            managedUnit.getDrive()
+                .reset();
+
             setPoliceEmergencyMode(
                 spawnedVehicle,
                 false
@@ -677,7 +686,8 @@ public class GTACore {
                             + finalWheels
                             + " wheel/ground-device parts and "
                             + finalParts
-                            + " total parts. Cruiser selected."
+                            + " total parts. Cruiser selected + registered as PoliceUnit. Units="
+                            + policeUnitManager.size()
                     ),
                 false
             );
