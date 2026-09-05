@@ -20,6 +20,7 @@ import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -132,6 +133,18 @@ public class GTACore {
     private static UUID wantedTargetId = null;
 
     /*
+     * MTS already receives throttle=1.0 during pursuit.  To make a
+     * police cruiser launch harder than the stock player car, wanted
+     * mode temporarily increases the engine power term and restores
+     * the exact original value when the pursuit ends.
+     */
+    private static final double WANTED_ENGINE_POWER_MULTIPLIER = 1.35;
+
+    private static final Map<Object, Double>
+        wantedEngineBasePower =
+            new IdentityHashMap<>();
+
+    /*
      * FOLLOW_DIGITAL_STEER
      *
      * Important MTS behavior learned from testing:
@@ -158,6 +171,18 @@ public class GTACore {
     private static boolean followDigitalSteeringActive = false;
 
     private static final double FOLLOW_STOP_DISTANCE = 7.0;
+
+    /*
+     * Longitudinal pursuit control.
+     *
+     * The old logic only noticed the target after entering the final
+     * 7-block stop radius.  At speed that is too late.  We now brake
+     * based on relative closing speed and time-to-close when the target
+     * is generally in front of the cruiser.
+     */
+    private static final double FOLLOW_BRAKE_SOFT_TTC = 3.0;
+    private static final double FOLLOW_BRAKE_HARD_TTC = 1.6;
+    private static final double FOLLOW_BRAKE_HEADING_LIMIT = 35.0;
 
     // Good enough; once inside this band, release the wheel.
     private static final double FOLLOW_ALIGN_DONE_DEGREES = 12.0;
@@ -1097,6 +1122,11 @@ public class GTACore {
                                     true
                                 );
 
+                                setWantedPursuitPower(
+                                    vehicle,
+                                    true
+                                );
+
                             } catch (Exception e) {
 
                                 e.printStackTrace();
@@ -1154,6 +1184,61 @@ public class GTACore {
                                 if (vehicle != null) {
 
                                     setPoliceEmergencyMode(
+                                        vehicle,
+                                        false
+                                    );
+
+                                    setWantedPursuitPower(
+                                        vehicle,
+                                        false
+                                    );
+
+                                    setWantedPursuitPower(
+                                        vehicle,
+                                        false
+                                    );
+
+                                    setWantedPursuitPower(
+                                        vehicle,
+                                        false
+                                    );
+
+                                    setWantedPursuitPower(
+                                        vehicle,
+                                        false
+                                    );
+
+                                    setWantedPursuitPower(
+                                        vehicle,
+                                        false
+                                    );
+
+                                    setWantedPursuitPower(
+                                        vehicle,
+                                        false
+                                    );
+
+                                    setWantedPursuitPower(
+                                        vehicle,
+                                        false
+                                    );
+
+                                    setWantedPursuitPower(
+                                        vehicle,
+                                        false
+                                    );
+
+                                    setWantedPursuitPower(
+                                        vehicle,
+                                        false
+                                    );
+
+                                    setWantedPursuitPower(
+                                        vehicle,
+                                        false
+                                    );
+
+                                    setWantedPursuitPower(
                                         vehicle,
                                         false
                                     );
@@ -2013,6 +2098,11 @@ public class GTACore {
                     vehicle,
                     false
                 );
+
+                setWantedPursuitPower(
+                    vehicle,
+                    false
+                );
             }
 
             resetFollowBaseline();
@@ -2177,8 +2267,14 @@ public class GTACore {
                     0.0
                 );
 
-                throttleCommand = 1.0;
-                brakeCommand = 0.0;
+                applyFollowLongitudinalControl(
+                    target,
+                    distance,
+                    dx,
+                    dz,
+                    absoluteError
+                );
+
                 parkingBrakeCommand = 0.0;
 
                 driveReverse = false;
@@ -2204,8 +2300,14 @@ public class GTACore {
 
                 followSteerPulseTick = 0;
 
-                throttleCommand = 1.0;
-                brakeCommand = 0.0;
+                applyFollowLongitudinalControl(
+                    target,
+                    distance,
+                    dx,
+                    dz,
+                    absoluteError
+                );
+
                 parkingBrakeCommand = 0.0;
 
                 driveReverse = false;
@@ -2303,8 +2405,14 @@ public class GTACore {
             /*
              * Same proven acceleration path as /gta forward.
              */
-            throttleCommand = 1.0;
-            brakeCommand = 0.0;
+            applyFollowLongitudinalControl(
+                target,
+                distance,
+                dx,
+                dz,
+                absoluteError
+            );
+
             parkingBrakeCommand = 0.0;
 
             driveReverse = false;
@@ -2368,8 +2476,14 @@ public class GTACore {
                 0.0
             );
 
-            throttleCommand = 1.0;
-            brakeCommand = 0.0;
+            applyFollowLongitudinalControl(
+                target,
+                distance,
+                dx,
+                dz,
+                absoluteError
+            );
+
             parkingBrakeCommand = 0.0;
 
             driveReverse = false;
@@ -2432,6 +2546,140 @@ public class GTACore {
 
         driveReverse = false;
         driveForward = true;
+    }
+
+    private static void applyFollowLongitudinalControl(
+        ServerPlayer target,
+        double distance,
+        double dx,
+        double dz,
+        double absoluteHeadingError
+    ) {
+
+        /*
+         * Do not let approach braking interfere with a target that is
+         * far off to the side/behind.  Hard-turn mode owns those cases.
+         */
+        if (
+            absoluteHeadingError >
+                FOLLOW_BRAKE_HEADING_LIMIT ||
+            distance <= 0.001
+        ) {
+
+            throttleCommand = 1.0;
+            brakeCommand = 0.0;
+            return;
+        }
+
+        double unitX =
+            dx / distance;
+
+        double unitZ =
+            dz / distance;
+
+        double targetVelocityX =
+            target.getDeltaMovement().x *
+                20.0;
+
+        double targetVelocityZ =
+            target.getDeltaMovement().z *
+                20.0;
+
+        /*
+         * Positive means the target is moving away along the line
+         * between target and cruiser.
+         */
+        double targetAwaySpeed =
+            targetVelocityX *
+                unitX +
+            targetVelocityZ *
+                unitZ;
+
+        double cruiserTowardTarget =
+            aiCurrentSpeed *
+            Math.max(
+                0.0,
+                Math.cos(
+                    Math.toRadians(
+                        absoluteHeadingError
+                    )
+                )
+            );
+
+        double closingSpeed =
+            cruiserTowardTarget -
+            targetAwaySpeed;
+
+        double remainingGap =
+            Math.max(
+                0.0,
+                distance -
+                    FOLLOW_STOP_DISTANCE
+            );
+
+        if (
+            closingSpeed <= 0.05
+        ) {
+
+            /*
+             * Target is pulling away or matching our speed: floor it.
+             */
+            throttleCommand = 1.0;
+            brakeCommand = 0.0;
+            return;
+        }
+
+        double timeToStopGap =
+            remainingGap /
+            closingSpeed;
+
+        if (
+            timeToStopGap <=
+                FOLLOW_BRAKE_HARD_TTC
+        ) {
+
+            /*
+             * Sudden stop directly ahead: full service brake.
+             */
+            throttleCommand = 0.0;
+            brakeCommand = 1.0;
+            return;
+        }
+
+        if (
+            timeToStopGap <
+                FOLLOW_BRAKE_SOFT_TTC
+        ) {
+
+            double urgency =
+                (
+                    FOLLOW_BRAKE_SOFT_TTC -
+                    timeToStopGap
+                ) /
+                (
+                    FOLLOW_BRAKE_SOFT_TTC -
+                    FOLLOW_BRAKE_HARD_TTC
+                );
+
+            throttleCommand = 0.0;
+
+            brakeCommand =
+                clamp(
+                    0.25 +
+                        urgency *
+                        0.60,
+                    0.25,
+                    0.85
+                );
+
+            return;
+        }
+
+        /*
+         * Plenty of room: maximum pedal request.
+         */
+        throttleCommand = 1.0;
+        brakeCommand = 0.0;
     }
 
     // ============================================================
@@ -4886,6 +5134,77 @@ public class GTACore {
         System.out.println(
             "[GTACore] MTS startup sequence requested + synced."
         );
+    }
+
+    // ============================================================
+    // WANTED PURSUIT POWER
+    // ============================================================
+
+    private static void setWantedPursuitPower(
+        Object vehicle,
+        boolean enabled
+    ) {
+
+        try {
+
+            for (
+                Object engine :
+                getEngines(vehicle)
+            ) {
+
+                if (enabled) {
+
+                    Double base =
+                        wantedEngineBasePower.get(
+                            engine
+                        );
+
+                    if (base == null) {
+
+                        base =
+                            getMTSVariableValue(
+                                engine,
+                                "fuelConsumptionVar"
+                            );
+
+                        wantedEngineBasePower.put(
+                            engine,
+                            base
+                        );
+                    }
+
+                    setMTSVariable(
+                        engine,
+                        "fuelConsumptionVar",
+                        base *
+                            WANTED_ENGINE_POWER_MULTIPLIER
+                    );
+
+                } else {
+
+                    Double base =
+                        wantedEngineBasePower.remove(
+                            engine
+                        );
+
+                    if (base != null) {
+
+                        setMTSVariable(
+                            engine,
+                            "fuelConsumptionVar",
+                            base
+                        );
+                    }
+                }
+            }
+
+        } catch (Exception e) {
+
+            System.err.println(
+                "[GTACore] Pursuit power fallback: "
+                    + e.getMessage()
+            );
+        }
     }
 
     // ============================================================
