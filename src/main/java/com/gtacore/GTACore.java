@@ -3462,6 +3462,12 @@ public class GTACore {
                     managed.getDrive()
                 );
 
+                configureManagedRoadNavigation(
+                    server,
+                    managed,
+                    targetId
+                );
+
                 runSelectedVehicleControl(
                     server
                 );
@@ -3469,6 +3475,9 @@ public class GTACore {
                 savePoliceDriveState(
                     managed.getDrive()
                 );
+
+                roadNavigationOverrideActive =
+                    false;
 
                 /*
                  * updateFollowNavigation clears followTargetId if the
@@ -3488,6 +3497,9 @@ public class GTACore {
             }
 
         } finally {
+
+            roadNavigationOverrideActive =
+                false;
 
             processingManagedPoliceUnit =
                 false;
@@ -3683,6 +3695,631 @@ public class GTACore {
             state.transmissionTickCounter;
     }
 
+    private static void configureManagedRoadNavigation(
+        MinecraftServer server,
+        PoliceUnitManager.ManagedUnit managed,
+        UUID targetId
+    ) {
+
+        roadNavigationOverrideActive =
+            false;
+
+        try {
+
+            if (
+                managed == null ||
+                targetId == null ||
+                selectedCar == null
+            ) {
+                return;
+            }
+
+            RoadNetworkStore roads =
+                RoadNetworkStore.get();
+
+            if (
+                roads.size() < 2
+            ) {
+
+                managed.getDrive()
+                    .roadUsingPath =
+                        false;
+
+                return;
+            }
+
+            ServerPlayer target =
+                server.getPlayerList()
+                    .getPlayer(
+                        targetId
+                    );
+
+            Entity wrapper =
+                getSelectedWrapper(
+                    server
+                );
+
+            Object vehicle =
+                getSelectedVehicle(
+                    server
+                );
+
+            if (
+                target == null ||
+                wrapper == null ||
+                vehicle == null ||
+                target.level().dimension() !=
+                    wrapper.level().dimension()
+            ) {
+
+                managed.getDrive()
+                    .roadUsingPath =
+                        false;
+
+                return;
+            }
+
+            String dimension =
+                getDimensionId(
+                    wrapper
+                );
+
+            RoadNetworkStore.RoadNode destination =
+                roads.findNearestNode(
+                    dimension,
+                    target.getX(),
+                    target.getY(),
+                    target.getZ(),
+                    ROAD_NODE_SEARCH_RADIUS
+                );
+
+            RoadNetworkStore.RoadNode start =
+                findBestRoadStartNode(
+                    roads,
+                    vehicle,
+                    wrapper,
+                    dimension
+                );
+
+            if (
+                destination == null ||
+                start == null
+            ) {
+
+                managed.getDrive()
+                    .roadUsingPath =
+                        false;
+
+                return;
+            }
+
+            PoliceUnitManager.DriveState drive =
+                managed.getDrive();
+
+            drive.roadRepathTicks++;
+
+            boolean routeMissing =
+                drive.roadRoute
+                    .isEmpty();
+
+            boolean destinationChanged =
+                drive.roadDestinationNodeId !=
+                    destination.id;
+
+            boolean startChanged =
+                drive.roadStartNodeId !=
+                    start.id;
+
+            boolean timedRepath =
+                drive.roadRepathTicks >=
+                    ROAD_REPATH_INTERVAL_TICKS;
+
+            if (
+                routeMissing ||
+                destinationChanged ||
+                startChanged ||
+                timedRepath
+            ) {
+
+                List<Integer> newRoute =
+                    buildForwardBiasedRoadRoute(
+                        roads,
+                        vehicle,
+                        wrapper,
+                        start,
+                        destination
+                    );
+
+                drive.roadRoute.clear();
+
+                drive.roadRoute.addAll(
+                    newRoute
+                );
+
+                drive.roadRouteIndex = 0;
+                drive.roadRepathTicks = 0;
+                drive.roadStartNodeId =
+                    start.id;
+
+                drive.roadDestinationNodeId =
+                    destination.id;
+
+                drive.roadUsingPath =
+                    !newRoute.isEmpty();
+            }
+
+            if (
+                !drive.roadUsingPath ||
+                drive.roadRoute
+                    .isEmpty()
+            ) {
+
+                return;
+            }
+
+            /*
+             * Skip graph points we have already reached.  This happens
+             * BEFORE the normal follow controller sees the target, so
+             * the car does not stop at every road node.
+             */
+            while (
+                drive.roadRouteIndex <
+                    drive.roadRoute.size()
+            ) {
+
+                RoadNetworkStore.RoadNode node =
+                    roads.getNode(
+                        drive.roadRoute.get(
+                            drive.roadRouteIndex
+                        )
+                    );
+
+                if (node == null) {
+
+                    drive.roadUsingPath =
+                        false;
+
+                    return;
+                }
+
+                double distance =
+                    node.horizontalDistanceTo(
+                        wrapper.getX(),
+                        wrapper.getZ()
+                    );
+
+                boolean finalNode =
+                    drive.roadRouteIndex >=
+                        drive.roadRoute.size() -
+                            1;
+
+                if (
+                    distance <=
+                        ROAD_WAYPOINT_REACHED_DISTANCE
+                ) {
+
+                    if (!finalNode) {
+
+                        drive.roadRouteIndex++;
+
+                        continue;
+                    }
+
+                    /*
+                     * The cruiser reached the road node closest to the
+                     * player.  Hand the final short segment back to the
+                     * existing direct-follow controller.
+                     */
+                    drive.roadUsingPath =
+                        false;
+
+                    return;
+                }
+
+                roadNavigationTargetX =
+                    node.x;
+
+                roadNavigationTargetZ =
+                    node.z;
+
+                roadNavigationOverrideActive =
+                    true;
+
+                return;
+            }
+
+        } catch (Exception e) {
+
+            roadNavigationOverrideActive =
+                false;
+
+            managed.getDrive()
+                .roadUsingPath =
+                    false;
+
+            System.err.println(
+                "[GTACore] Road path update failed:"
+            );
+
+            e.printStackTrace();
+        }
+    }
+
+    private static RoadNetworkStore.RoadNode
+        findBestRoadStartNode(
+            RoadNetworkStore roads,
+            Object vehicle,
+            Entity wrapper,
+            String dimension
+        ) throws Exception {
+
+        RoadNetworkStore.RoadNode nearest =
+            roads.findNearestNode(
+                dimension,
+                wrapper.getX(),
+                wrapper.getY(),
+                wrapper.getZ(),
+                ROAD_NODE_SEARCH_RADIUS
+            );
+
+        if (nearest == null) {
+            return null;
+        }
+
+        double[] forward =
+            getVehicleForwardXZ(
+                vehicle
+            );
+
+        RoadNetworkStore.RoadNode best =
+            null;
+
+        double bestScore =
+            Double.POSITIVE_INFINITY;
+
+        for (
+            RoadNetworkStore.RoadNode node :
+            roads.getNodesForDimension(
+                dimension
+            )
+        ) {
+
+            double dx =
+                node.x -
+                wrapper.getX();
+
+            double dz =
+                node.z -
+                wrapper.getZ();
+
+            double distance =
+                Math.sqrt(
+                    dx * dx +
+                    dz * dz
+                );
+
+            if (
+                distance >
+                    ROAD_NODE_SEARCH_RADIUS
+            ) {
+
+                continue;
+            }
+
+            double score =
+                distance;
+
+            if (distance > 1.0) {
+
+                double dot =
+                    (
+                        dx *
+                            forward[0] +
+                        dz *
+                            forward[1]
+                    ) /
+                    distance;
+
+                /*
+                 * Prefer a road node in front/alongside the vehicle.
+                 * A node directly behind gets a large penalty so a
+                 * pass-over does not immediately command a 180-degree
+                 * target when an ahead road entry exists.
+                 */
+                if (dot < -0.25) {
+
+                    score +=
+                        30.0;
+
+                } else if (dot < 0.15) {
+
+                    score +=
+                        6.0;
+                }
+            }
+
+            if (
+                score <
+                    bestScore
+            ) {
+
+                bestScore =
+                    score;
+
+                best =
+                    node;
+            }
+        }
+
+        return best == null
+            ? nearest
+            : best;
+    }
+
+    private static List<Integer> buildForwardBiasedRoadRoute(
+        RoadNetworkStore roads,
+        Object vehicle,
+        Entity wrapper,
+        RoadNetworkStore.RoadNode start,
+        RoadNetworkStore.RoadNode goal
+    ) throws Exception {
+
+        double[] forward =
+            getVehicleForwardXZ(
+                vehicle
+            );
+
+        Set<Integer> neighbors =
+            roads.getNeighborIds(
+                start.id
+            );
+
+        List<Integer> bestPath =
+            Collections.emptyList();
+
+        double bestLength =
+            Double.POSITIVE_INFINITY;
+
+        /*
+         * First try routes whose first edge is not behind the cruiser.
+         * This is the important pass-over behavior: the car keeps
+         * following the road forward and the graph loops it back rather
+         * than instantly pointing the steering target through 180°.
+         */
+        for (
+            int firstId :
+            neighbors
+        ) {
+
+            RoadNetworkStore.RoadNode first =
+                roads.getNode(
+                    firstId
+                );
+
+            if (first == null) {
+                continue;
+            }
+
+            double dx =
+                first.x -
+                wrapper.getX();
+
+            double dz =
+                first.z -
+                wrapper.getZ();
+
+            double distance =
+                Math.sqrt(
+                    dx * dx +
+                    dz * dz
+                );
+
+            if (distance < 0.001) {
+                continue;
+            }
+
+            double headingDot =
+                (
+                    dx *
+                        forward[0] +
+                    dz *
+                        forward[1]
+                ) /
+                distance;
+
+            if (headingDot < -0.20) {
+                continue;
+            }
+
+            List<Integer> candidate;
+
+            if (
+                start.id !=
+                    goal.id
+            ) {
+
+                candidate =
+                    roads.findPathAvoiding(
+                        firstId,
+                        goal.id,
+                        start.id
+                    );
+
+            } else {
+
+                /*
+                 * Player and cruiser are nearest the SAME road node.
+                 * This is common when the player jumps/passes over the
+                 * police car.  Search for a real graph loop that leaves
+                 * through the forward edge and returns to start through
+                 * a DIFFERENT edge.
+                 */
+                candidate =
+                    findRoadLoopBackToStart(
+                        roads,
+                        start,
+                        firstId
+                    );
+            }
+
+            if (
+                candidate.isEmpty()
+            ) {
+                continue;
+            }
+
+            double candidateLength =
+                distance +
+                roads.getPathLength(
+                    candidate
+                );
+
+            if (
+                candidateLength <
+                    bestLength
+            ) {
+
+                bestLength =
+                    candidateLength;
+
+                bestPath =
+                    new ArrayList<>(
+                        candidate
+                    );
+            }
+        }
+
+        if (!bestPath.isEmpty()) {
+
+            return bestPath;
+        }
+
+        /*
+         * No forward loop/route exists in the recorded graph.  Fall
+         * back to ordinary A*.  This keeps sparse test networks usable
+         * instead of refusing to pursue.
+         */
+        return roads.findPath(
+            start.id,
+            goal.id
+        );
+    }
+
+    private static List<Integer> findRoadLoopBackToStart(
+        RoadNetworkStore roads,
+        RoadNetworkStore.RoadNode start,
+        int firstId
+    ) {
+
+        List<Integer> best =
+            Collections.emptyList();
+
+        double bestLength =
+            Double.POSITIVE_INFINITY;
+
+        for (
+            int returnNeighborId :
+            roads.getNeighborIds(
+                start.id
+            )
+        ) {
+
+            if (
+                returnNeighborId ==
+                    firstId
+            ) {
+
+                continue;
+            }
+
+            /*
+             * Do not allow the search to pass through start before it
+             * reaches another return edge.  That forces an actual loop
+             * around the road graph rather than an immediate U-turn.
+             */
+            List<Integer> middle =
+                roads.findPathAvoiding(
+                    firstId,
+                    returnNeighborId,
+                    start.id
+                );
+
+            if (middle.isEmpty()) {
+                continue;
+            }
+
+            List<Integer> loop =
+                new ArrayList<>(
+                    middle
+                );
+
+            loop.add(
+                start.id
+            );
+
+            double length =
+                roads.getPathLength(
+                    loop
+                );
+
+            if (
+                length <
+                    bestLength
+            ) {
+
+                bestLength =
+                    length;
+
+                best =
+                    loop;
+            }
+        }
+
+        return best;
+    }
+
+    private static double[] getVehicleForwardXZ(
+        Object vehicle
+    ) throws Exception {
+
+        Object orientation =
+            getFieldValue(
+                vehicle,
+                "orientation"
+            );
+
+        double forwardX =
+            -getDoubleField(
+                orientation,
+                "m02"
+            );
+
+        double forwardZ =
+            -getDoubleField(
+                orientation,
+                "m22"
+            );
+
+        double length =
+            Math.sqrt(
+                forwardX * forwardX +
+                forwardZ * forwardZ
+            );
+
+        if (length < 0.001) {
+
+            return new double[] {
+                0.0,
+                1.0
+            };
+        }
+
+        return new double[] {
+            forwardX / length,
+            forwardZ / length
+        };
+    }
+
     // ============================================================
     // FOLLOW NAVIGATION
     // ============================================================
@@ -3741,12 +4378,22 @@ public class GTACore {
             return;
         }
 
+        double navigationTargetX =
+            roadNavigationOverrideActive
+                ? roadNavigationTargetX
+                : target.getX();
+
+        double navigationTargetZ =
+            roadNavigationOverrideActive
+                ? roadNavigationTargetZ
+                : target.getZ();
+
         double dx =
-            target.getX() -
+            navigationTargetX -
             wrapper.getX();
 
         double dz =
-            target.getZ() -
+            navigationTargetZ -
             wrapper.getZ();
 
         double distance =
