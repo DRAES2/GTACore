@@ -222,6 +222,11 @@ public final class PoliceUnitManager {
     /**
      * Per-cruiser copy of the mutable values used by GTACore's proven
      * follow controller.
+     *
+     * GTACore loads this state immediately before ticking one cruiser
+     * and writes it back immediately afterward.  Therefore a Mustang
+     * can be hard-turning while a Mercedes is driving straight without
+     * either vehicle corrupting the other's controller state.
      */
     public static final class DriveState {
 
@@ -241,15 +246,6 @@ public final class PoliceUnitManager {
         int followHardTurnConfirmTicks;
         int followHardTurnGrowthTicks;
         double followPreviousAbsoluteError;
-
-        /*
-         * Previous SIGNED error is kept separately.
-         *
-         * This is critical around the +/-180-degree wrap.  We must
-         * compare one real tick to the next rather than comparing the
-         * current sign to a latched turn direction.
-         */
-        double followPreviousHeadingError;
 
         double aiTargetSpeed;
         double aiCurrentSpeed;
@@ -276,6 +272,7 @@ public final class PoliceUnitManager {
 
             /*
              * FOLLOW_TURNING in GTACore is 1.
+             * We keep this class implementation-independent otherwise.
              */
             followBaselineMode = 1;
             followTurnDirection = 0.0;
@@ -289,7 +286,6 @@ public final class PoliceUnitManager {
             followHardTurnConfirmTicks = 0;
             followHardTurnGrowthTicks = 0;
             followPreviousAbsoluteError = 0.0;
-            followPreviousHeadingError = 0.0;
 
             aiTargetSpeed = 0.0;
             aiCurrentSpeed = 0.0;
