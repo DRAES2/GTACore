@@ -149,7 +149,7 @@ public class GTACore {
     private static final double FOLLOW_STOP_DISTANCE = 7.0;
 
     // Good enough; once inside this band, release the wheel.
-    private static final double FOLLOW_ALIGN_DONE_DEGREES = 8.0;
+    private static final double FOLLOW_ALIGN_DONE_DEGREES = 12.0;
 
     // Straight mode ignores normal movement until a real turn is needed.
     private static final double FOLLOW_REALIGN_START_DEGREES = 24.0;
@@ -159,22 +159,24 @@ public class GTACore {
     private static final double FOLLOW_FULL_STEER = 45.0;
 
     /*
-     * Pulse schedule by heading error:
+     * FOLLOW_FEEDBACK_TAP_CYCLE
      *
-     *  8-14 deg : 1 tick ON, 4 ticks OFF
-     * 14-25 deg : 1 tick ON, 2 ticks OFF
-     * 25-45 deg : 2 ticks ON, 2 ticks OFF
-     * 45-70 deg : 4 ticks ON, 1 tick OFF
-     * 70+   deg : HOLD continuously
+     * We do NOT guess a total turning duration.
      *
-     * This gives us turn "size" through time, not fake wheel angles.
+     * Every tick we measure the car's real heading relative to the
+     * target.  While it is not aligned, the driver repeats:
+     *
+     *   1 tick full LEFT/RIGHT
+     *   1 tick wheel released
+     *   measure heading again
+     *
+     * The heading measurement decides when turning ends.
+     * Timing only controls how aggressively we rotate.
      */
-    private static final double FOLLOW_HOLD_TURN_DEGREES = 70.0;
-    private static final double FOLLOW_WIDE_TURN_DEGREES = 45.0;
-    private static final double FOLLOW_MEDIUM_TURN_DEGREES = 25.0;
-    private static final double FOLLOW_LIGHT_TURN_DEGREES = 14.0;
+    private static final int FOLLOW_TAP_ON_TICKS = 1;
+    private static final int FOLLOW_TAP_OFF_TICKS = 1;
 
-    // Basic speed control while turning.
+    // Basic speed control while correcting direction.
     private static final double FOLLOW_TURN_BRAKE_SPEED = 2.5;
     private static final double FOLLOW_TURN_BRAKE = 0.55;
     private static final double FOLLOW_TURN_THROTTLE = 0.38;
@@ -1830,9 +1832,13 @@ public class GTACore {
         }
 
         /*
-         * Keep one direction for the entire maneuver.  If the nose
-         * crosses the target heading, STOP steering instead of
-         * instantly commanding the opposite side.
+         * Keep one direction for the entire maneuver.
+         *
+         * We do not know or predict how many ticks the turn will
+         * require.  Every tick, the real heading tells us whether
+         * the car is now going in the same general direction as the
+         * target.  If the nose crosses that direction, STOP steering
+         * rather than instantly commanding the opposite side.
          */
         boolean crossedTargetHeading =
             Math.signum(
@@ -1869,14 +1875,22 @@ public class GTACore {
         }
 
         /*
-         * Calculate only ON/OFF timing.
-         * Steering itself is always full left, full right, or center.
+         * No predicted turn duration.
+         *
+         * The pulse is just an actuator command.  Alignment is
+         * determined from followHeadingError, which is recalculated
+         * from the car's actual orientation every server tick.
          */
+        int tapCycleLength =
+            FOLLOW_TAP_ON_TICKS +
+            FOLLOW_TAP_OFF_TICKS;
+
         boolean steeringOn =
-            shouldHoldFollowSteering(
-                absoluteError,
-                followSteerPulseTick
-            );
+            (
+                followSteerPulseTick %
+                    tapCycleLength
+            ) <
+                FOLLOW_TAP_ON_TICKS;
 
         if (steeringOn) {
 
@@ -1888,6 +1902,10 @@ public class GTACore {
 
         } else {
 
+            /*
+             * Release the wheel between taps.  This lets the car
+             * physically respond before the next correction.
+             */
             setFollowDigitalSteering(
                 vehicle,
                 0.0
@@ -1921,64 +1939,6 @@ public class GTACore {
 
         driveReverse = false;
         driveForward = true;
-    }
-
-    private static boolean shouldHoldFollowSteering(
-        double absoluteError,
-        int pulseTick
-    ) {
-
-        if (
-            absoluteError >=
-                FOLLOW_HOLD_TURN_DEGREES
-        ) {
-
-            // Full hold for a very wide/sharp turn.
-            return true;
-        }
-
-        int onTicks;
-        int offTicks;
-
-        if (
-            absoluteError >=
-                FOLLOW_WIDE_TURN_DEGREES
-        ) {
-
-            onTicks = 4;
-            offTicks = 1;
-
-        } else if (
-            absoluteError >=
-                FOLLOW_MEDIUM_TURN_DEGREES
-        ) {
-
-            onTicks = 2;
-            offTicks = 2;
-
-        } else if (
-            absoluteError >=
-                FOLLOW_LIGHT_TURN_DEGREES
-        ) {
-
-            onTicks = 1;
-            offTicks = 2;
-
-        } else {
-
-            onTicks = 1;
-            offTicks = 4;
-        }
-
-        int cycle =
-            onTicks +
-            offTicks;
-
-        return (
-            pulseTick %
-                cycle
-        ) <
-            onTicks;
     }
 
     // ============================================================
@@ -3904,7 +3864,7 @@ public class GTACore {
         source.sendSuccess(
             () -> Component.literal(
                 String.format(
-                    "Following: %s | mode: %s | error: %.1f deg | turn: %.0f | pulse tick: %d",
+                    "Following: %s | mode: %s | heading error: %.1f deg | turn side: %.0f | feedback tap: %d",
                     followTargetId != null,
                     followBaselineMode ==
                         FOLLOW_STRAIGHT
