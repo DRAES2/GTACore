@@ -115,96 +115,54 @@ public class GTACore {
     private static final double HOME_TURN_STEERING = 30.0;
 
     // ============================================================
-    // FOLLOW SYSTEM
+    // FOLLOW SYSTEM - BASELINE
     // ============================================================
 
-    /*
-     * /gta follow makes the selected car follow the player who
-     * issued the command.  This is the first moving-target version
-     * of the driver AI.
-     */
     private static UUID followTargetId = null;
 
-    private static final int FOLLOW_TURN_FOLLOW = 0;
-    private static final int FOLLOW_TURN_REVERSE = 1;
-    private static final int FOLLOW_TURN_FORWARD = 2;
-
-    private static int followTurnPhase =
-        FOLLOW_TURN_FOLLOW;
-
-    private static double followTurnDirection = 1.0;
-    private static int followTurnTicks = 0;
-    private static int followTurnCooldownTicks = 0;
-
     /*
-     * Reverse is only a brief repositioning move.  The old controller
-     * could remain in reverse indefinitely because its exit condition
-     * depended only on the heading error.  On dirt that created the
-     * left/right reversing crawl the player observed.
+     * FOLLOW_BASELINE_ALIGNING
+     *
+     * Keep follow deliberately simple until the foundation is stable.
+     *
+     * ALIGNING:
+     * - choose LEFT or RIGHT once
+     * - keep that direction latched
+     * - slow down while turning
+     * - never switch left/right during the same turn
+     *
+     * STRAIGHT:
+     * - steering is physically forced to 0
+     * - use the same full-throttle path as /gta forward
+     * - ignore small heading errors
+     * - only start another turn after a large error persists
      */
-    private static final int FOLLOW_REVERSE_MAX_TICKS = 14;
-    private static final int FOLLOW_FORWARD_TURN_MAX_TICKS = 55;
-    private static final int FOLLOW_TURN_COOLDOWN_TICKS = 60;
+    private static final int FOLLOW_BASELINE_ALIGNING = 0;
+    private static final int FOLLOW_BASELINE_STRAIGHT = 1;
+
+    private static int followBaselineMode =
+        FOLLOW_BASELINE_ALIGNING;
+
+    private static double followTurnDirection = 0.0;
+    private static int followMisalignmentTicks = 0;
+    private static double followHeadingError = 0.0;
 
     private static final double FOLLOW_STOP_DISTANCE = 7.0;
-    private static final double FOLLOW_RESUME_DISTANCE = 9.5;
-    private static final double FOLLOW_TURN_START_ANGLE = 105.0;
-    private static final double FOLLOW_REVERSE_TO_FORWARD_ANGLE = 100.0;
-    private static final double FOLLOW_TURN_FINISH_ANGLE = 24.0;
-    private static final double FOLLOW_STEERING_GAIN = 0.60;
-    private static final double FOLLOW_TURN_STEERING = 28.0;
 
-    /*
-     * FOLLOW TRAJECTORY LOCK
-     *
-     * The car has two simple states:
-     * 1. ALIGNING: keep steering toward the player until the nose is
-     *    generally lined up.
-     * 2. LOCKED: wheel stays exactly centered.  Do not steer again
-     *    until the player moves clearly outside the car's trajectory.
-     *
-     * The wide gap between ENTER and EXIT is deliberate hysteresis.
-     * It prevents tiny target motion from causing left/right twitching.
-     */
-    private static final double FOLLOW_ALIGNMENT_ENTER_DEGREES = 12.0;
-    private static final double FOLLOW_ALIGNMENT_MAX_STEERING = 14.0;
-    private static final double FOLLOW_ALIGNMENT_MIN_STEERING = 3.0;
+    // Good-enough alignment; perfection is not required.
+    private static final double FOLLOW_ALIGN_DONE_DEGREES = 8.0;
 
-    /*
-     * Straight-follow is now based on a ROAD/CORRIDOR idea rather
-     * than constantly aiming at the player's exact point.
-     *
-     * Once the player is inside this forward corridor, the wheel is
-     * held at exactly zero.  The player has to move meaningfully out
-     * of the corridor before steering is allowed again.
-     */
-    private static final double FOLLOW_CORRIDOR_ENTER_BLOCKS = 2.5;
-    private static final double FOLLOW_CORRIDOR_EXIT_BLOCKS = 5.5;
-    private static final int FOLLOW_LOCK_MIN_TICKS = 30;
+    // Do not leave straight mode for small target motion.
+    private static final double FOLLOW_REALIGN_START_DEGREES = 30.0;
+    private static final int FOLLOW_REALIGN_CONFIRM_TICKS = 8;
 
-    private static boolean followTrajectoryLocked = false;
-    private static int followTrajectoryLockedTicks = 0;
-    private static double followHeadingError = 0.0;
-    private static double followLateralOffset = 0.0;
+    // Fixed steering during one latched alignment maneuver.
+    private static final double FOLLOW_ALIGN_STEERING = 12.0;
 
-    /*
-     * SHARP REDIRECT
-     *
-     * Used when the followed player suddenly cuts hard across or
-     * behind the car.  The AI first sheds speed, then uses a brief
-     * parking-brake pulse at high speed to help rotate, and finally
-     * powers through the remainder of the turn.
-     */
-    private static final double FOLLOW_SHARP_REDIRECT_DEGREES = 60.0;
-    private static final double FOLLOW_DRIFT_REDIRECT_DEGREES = 100.0;
-    private static final double FOLLOW_REDIRECT_EXIT_DEGREES = 12.0;
-    private static final double FOLLOW_REDIRECT_BRAKE_SPEED = 2.4;
-    private static final double FOLLOW_DRIFT_MIN_SPEED = 3.0;
-    private static final int FOLLOW_DRIFT_PULSE_TICKS = 4;
-    private static final double FOLLOW_REDIRECT_STEERING = 26.0;
-
-    private static boolean followSharpRedirecting = false;
-    private static int followDriftPulseTicksRemaining = 0;
+    // Slow turn behavior.  No reverse, no drift, no parking brake.
+    private static final double FOLLOW_ALIGN_SPEED_LIMIT = 1.6;
+    private static final double FOLLOW_ALIGN_BRAKE = 0.62;
+    private static final double FOLLOW_ALIGN_THROTTLE = 0.28;
 
     /*
      * FORWARD_ONLY_AUTONOMY
@@ -328,6 +286,17 @@ public class GTACore {
     public GTACore() {
         MinecraftForge.EVENT_BUS.register(this);
         System.out.println("[GTACore] Loaded!");
+    }
+
+    private static void resetFollowBaseline() {
+
+        followBaselineMode =
+            FOLLOW_BASELINE_ALIGNING;
+
+        followTurnDirection = 0.0;
+        followMisalignmentTicks = 0;
+        followHeadingError = 0.0;
+        parkingBrakeCommand = 0.0;
     }
 
     // ============================================================
@@ -458,15 +427,7 @@ public class GTACore {
                             driveReverse = false;
                             returningHome = false;
                             followTargetId = null;
-                            followTurnPhase = FOLLOW_TURN_FOLLOW;
-                            followTurnDirection = 1.0;
-                            followTrajectoryLocked = false;
-                            followTrajectoryLockedTicks = 0;
-                            followHeadingError = 0.0;
-                            followLateralOffset = 0.0;
-                            followSharpRedirecting = false;
-                            followDriftPulseTicksRemaining = 0;
-                            parkingBrakeCommand = 0.0;
+                            resetFollowBaseline();
                             homeTurnPhase = HOME_TURN_FOLLOW;
                             homeTurnDirection = 1.0;
                             throttleCommand = 0.0;
@@ -1088,19 +1049,7 @@ public class GTACore {
 
                             driveReverse = false;
 
-                            followTurnPhase =
-                                FOLLOW_TURN_FOLLOW;
-
-                            followTurnDirection = 1.0;
-                            followTurnTicks = 0;
-                            followTurnCooldownTicks = 0;
-                            followTrajectoryLocked = false;
-                            followTrajectoryLockedTicks = 0;
-                            followHeadingError = 0.0;
-                            followLateralOffset = 0.0;
-                            followSharpRedirecting = false;
-                            followDriftPulseTicksRemaining = 0;
-                            parkingBrakeCommand = 0.0;
+                            resetFollowBaseline();
 
                             context.getSource()
                                 .sendSuccess(
@@ -1119,22 +1068,12 @@ public class GTACore {
                         .executes(context -> {
 
                             followTargetId = null;
-                            followTurnPhase =
-                                FOLLOW_TURN_FOLLOW;
-                            followTurnDirection = 1.0;
-                            followTurnTicks = 0;
-                            followTurnCooldownTicks = 0;
-                            followTrajectoryLocked = false;
-                            followTrajectoryLockedTicks = 0;
-                            followHeadingError = 0.0;
-                            followLateralOffset = 0.0;
-                            followSharpRedirecting = false;
-                            followDriftPulseTicksRemaining = 0;
-                            parkingBrakeCommand = 0.0;
+                            resetFollowBaseline();
 
                             driveForward = false;
                             driveReverse = false;
-                            throttleCommand = 1.0;
+                            throttleCommand = 0.0;
+                            brakeCommand = 1.0;
                             steeringTarget = 0.0;
 
                             context.getSource()
@@ -1158,6 +1097,8 @@ public class GTACore {
                     Commands.literal("stop")
                         .executes(context -> {
 
+                            followTargetId = null;
+                            resetFollowBaseline();
                             returningHome = false;
                             homeTurnPhase = HOME_TURN_FOLLOW;
                             homeTurnDirection = 1.0;
@@ -1689,44 +1630,19 @@ public class GTACore {
                     followTargetId
                 );
 
-        if (target == null) {
-
-            followTargetId = null;
-            followTrajectoryLocked = false;
-            followTrajectoryLockedTicks = 0;
-            followSharpRedirecting = false;
-            followDriftPulseTicksRemaining = 0;
-            followHeadingError = 0.0;
-
-            driveForward = false;
-            driveReverse = false;
-            throttleCommand = 0.0;
-            brakeCommand = 1.0;
-            parkingBrakeCommand = 0.0;
-
-            centerSteeringImmediately(
-                vehicle
-            );
-
-            return;
-        }
-
         if (
+            target == null ||
             target.level().dimension() !=
-            wrapper.level().dimension()
+                wrapper.level().dimension()
         ) {
 
-            followTrajectoryLocked = false;
-            followTrajectoryLockedTicks = 0;
-            followSharpRedirecting = false;
-            followDriftPulseTicksRemaining = 0;
-            followHeadingError = 0.0;
+            followTargetId = null;
+            resetFollowBaseline();
 
             driveForward = false;
             driveReverse = false;
             throttleCommand = 0.0;
             brakeCommand = 1.0;
-            parkingBrakeCommand = 0.0;
 
             centerSteeringImmediately(
                 vehicle
@@ -1754,6 +1670,9 @@ public class GTACore {
                 vehicle
             );
 
+        /*
+         * Close enough: stop.  No steering corrections while parked.
+         */
         if (
             distance <=
                 FOLLOW_STOP_DISTANCE
@@ -1764,12 +1683,6 @@ public class GTACore {
             throttleCommand = 0.0;
             brakeCommand = 1.0;
             parkingBrakeCommand = 0.0;
-
-            followTrajectoryLocked = true;
-            followTrajectoryLockedTicks = 0;
-            followLateralOffset = 0.0;
-            followSharpRedirecting = false;
-            followDriftPulseTicksRemaining = 0;
 
             centerSteeringImmediately(
                 vehicle
@@ -1790,136 +1703,130 @@ public class GTACore {
                 followHeadingError
             );
 
-        /*
-         * Signed sideways distance from the car's current forward
-         * trajectory to the player.
-         *
-         * This is the key anti-zig-zag measurement.  A player can be
-         * a few degrees off-center without requiring another steering
-         * correction if they are still inside the same general lane.
-         */
-        followLateralOffset =
-            distance *
-            Math.sin(
-                Math.toRadians(
-                    followHeadingError
-                )
-            );
-
-        double absoluteLateralOffset =
-            Math.abs(
-                followLateralOffset
-            );
-
-        /*
-         * A sudden large heading change enters SHARP REDIRECT mode.
-         * This mode is intentionally separate from normal follow
-         * steering so the car can react aggressively without causing
-         * ordinary straight-line twitching.
-         */
+        // ========================================================
+        // STRAIGHT
+        // ========================================================
         if (
-            !followSharpRedirecting &&
-            absoluteError >=
-                FOLLOW_SHARP_REDIRECT_DEGREES
+            followBaselineMode ==
+                FOLLOW_BASELINE_STRAIGHT
         ) {
 
-            followSharpRedirecting = true;
-            followTrajectoryLocked = false;
-            followTrajectoryLockedTicks = 0;
-            followDriftPulseTicksRemaining = 0;
+            /*
+             * This is absolute: while straight, wheel = 0.
+             * We do not make tiny corrections.
+             */
+            centerSteeringImmediately(
+                vehicle
+            );
+
+            /*
+             * A new turn is allowed only if the player stays at
+             * least 30 degrees off our nose for 8 consecutive ticks.
+             * One noisy reading cannot start a turn.
+             */
+            if (
+                absoluteError >=
+                    FOLLOW_REALIGN_START_DEGREES
+            ) {
+
+                followMisalignmentTicks++;
+
+            } else {
+
+                followMisalignmentTicks = 0;
+            }
+
+            if (
+                followMisalignmentTicks >=
+                    FOLLOW_REALIGN_CONFIRM_TICKS
+            ) {
+
+                followBaselineMode =
+                    FOLLOW_BASELINE_ALIGNING;
+
+                followTurnDirection =
+                    Math.signum(
+                        followHeadingError
+                    );
+
+                if (
+                    followTurnDirection == 0.0
+                ) {
+                    followTurnDirection = 1.0;
+                }
+
+                followMisalignmentTicks = 0;
+            }
+
+            /*
+             * Same proven acceleration as /gta forward.
+             */
+            throttleCommand = 1.0;
+            brakeCommand = 0.0;
+            parkingBrakeCommand = 0.0;
+
+            driveReverse = false;
+            driveForward = true;
+
+            return;
         }
 
-        if (followSharpRedirecting) {
+        // ========================================================
+        // ALIGNING
+        // ========================================================
 
-            double turnDirection =
+        /*
+         * If this alignment maneuver has not picked a direction yet,
+         * choose it ONCE from the player's current side.
+         */
+        if (
+            followTurnDirection == 0.0
+        ) {
+
+            followTurnDirection =
                 Math.signum(
                     followHeadingError
                 );
 
-            steeringTarget =
-                turnDirection *
-                FOLLOW_REDIRECT_STEERING;
-
-            /*
-             * Phase 1: shed speed fast.
-             */
             if (
-                aiCurrentSpeed >
-                    FOLLOW_REDIRECT_BRAKE_SPEED
+                followTurnDirection == 0.0
             ) {
-
-                throttleCommand = 0.0;
-                brakeCommand = 0.78;
-
-                /*
-                 * For a very sharp cut at real speed, pulse MTS's
-                 * parking brake for only a few ticks while steering.
-                 * This helps the car rotate instead of making a huge
-                 * grip-limited arc.  It is deliberately momentary.
-                 */
-                if (
-                    absoluteError >=
-                        FOLLOW_DRIFT_REDIRECT_DEGREES &&
-                    aiCurrentSpeed >=
-                        FOLLOW_DRIFT_MIN_SPEED
-                ) {
-
-                    if (
-                        followDriftPulseTicksRemaining <= 0
-                    ) {
-                        followDriftPulseTicksRemaining =
-                            FOLLOW_DRIFT_PULSE_TICKS;
-                    }
-
-                    parkingBrakeCommand = 1.0;
-
-                    followDriftPulseTicksRemaining--;
-
-                    if (
-                        followDriftPulseTicksRemaining <= 0
-                    ) {
-                        parkingBrakeCommand = 0.0;
-                    }
-
-                } else {
-
-                    parkingBrakeCommand = 0.0;
-                    followDriftPulseTicksRemaining = 0;
-                }
-
-            } else {
-
-                /*
-                 * Phase 2: once enough speed is gone, release the
-                 * brakes and power through the turn.
-                 */
-                parkingBrakeCommand = 0.0;
-                followDriftPulseTicksRemaining = 0;
-                brakeCommand = 0.0;
-                throttleCommand = 0.42;
+                followTurnDirection = 1.0;
             }
+        }
 
-            /*
-             * Once the nose is generally pointed toward the player,
-             * immediately center the wheel and return to normal
-             * full-speed trajectory lock.
-             */
-            if (
-                absoluteError <=
-                    FOLLOW_REDIRECT_EXIT_DEGREES
-            ) {
+        boolean crossedTargetHeading =
+            Math.signum(
+                followHeadingError
+            ) !=
+            followTurnDirection;
 
-                followSharpRedirecting = false;
-                followTrajectoryLocked = true;
-                followTrajectoryLockedTicks = 0;
-                parkingBrakeCommand = 0.0;
-                brakeCommand = 0.0;
-                throttleCommand = 1.0;
+        /*
+         * Finish this one turn when alignment is good enough OR when
+         * the nose crosses the target heading.
+         *
+         * Crucially, we do NOT immediately start turning the opposite
+         * way.  We enter STRAIGHT mode first.
+         */
+        if (
+            absoluteError <=
+                FOLLOW_ALIGN_DONE_DEGREES ||
+            crossedTargetHeading
+        ) {
 
-                centerSteeringImmediately(
-                    vehicle
-                );
-            }
+            followBaselineMode =
+                FOLLOW_BASELINE_STRAIGHT;
+
+            followTurnDirection = 0.0;
+            followMisalignmentTicks = 0;
+
+            centerSteeringImmediately(
+                vehicle
+            );
+
+            throttleCommand = 1.0;
+            brakeCommand = 0.0;
+            parkingBrakeCommand = 0.0;
 
             driveReverse = false;
             driveForward = true;
@@ -1928,105 +1835,36 @@ public class GTACore {
         }
 
         /*
-         * Normal trajectory-lock behavior.
-         *
-         * LOCKED means "drive this line", not "point exactly at the
-         * player every tick".
+         * One maneuver = one fixed turn direction.
+         * No left/right swapping while this turn is active.
          */
-        if (followTrajectoryLocked) {
-
-            followTrajectoryLockedTicks++;
-
-            boolean minimumLockComplete =
-                followTrajectoryLockedTicks >=
-                    FOLLOW_LOCK_MIN_TICKS;
-
-            /*
-             * During the initial lock period the wheel absolutely
-             * stays centered.  After that, the player still has to
-             * leave the corridor by more than 5.5 blocks before we
-             * allow a new correction.
-             */
-            if (
-                !minimumLockComplete ||
-                absoluteLateralOffset <=
-                    FOLLOW_CORRIDOR_EXIT_BLOCKS
-            ) {
-
-                centerSteeringImmediately(
-                    vehicle
-                );
-
-            } else {
-
-                followTrajectoryLocked =
-                    false;
-
-                followTrajectoryLockedTicks = 0;
-            }
-        }
-
-        if (!followTrajectoryLocked) {
-
-            /*
-             * Re-enter straight driving as soon as the player is
-             * generally in front AND inside the narrow corridor.
-             *
-             * We do not wait for perfect alignment.
-             */
-            boolean goodEnoughAlignment =
-                absoluteError <=
-                    FOLLOW_ALIGNMENT_ENTER_DEGREES &&
-                absoluteLateralOffset <=
-                    FOLLOW_CORRIDOR_ENTER_BLOCKS;
-
-            if (goodEnoughAlignment) {
-
-                followTrajectoryLocked =
-                    true;
-
-                followTrajectoryLockedTicks = 0;
-
-                centerSteeringImmediately(
-                    vehicle
-                );
-
-            } else {
-
-                double requestedSteering =
-                    clamp(
-                        followHeadingError *
-                            0.24,
-                        -FOLLOW_ALIGNMENT_MAX_STEERING,
-                        FOLLOW_ALIGNMENT_MAX_STEERING
-                    );
-
-                if (
-                    Math.abs(
-                        requestedSteering
-                    ) <
-                        FOLLOW_ALIGNMENT_MIN_STEERING
-                ) {
-
-                    requestedSteering =
-                        Math.copySign(
-                            FOLLOW_ALIGNMENT_MIN_STEERING,
-                            followHeadingError
-                        );
-                }
-
-                steeringTarget =
-                    requestedSteering;
-            }
-        }
+        steeringTarget =
+            followTurnDirection *
+            FOLLOW_ALIGN_STEERING;
 
         /*
-         * Proven normal acceleration path.
+         * Turning while fast is what creates the huge overshoot.
+         * First shed speed with the normal brake.  Once slow enough,
+         * use a small throttle to keep the car rotating forward.
          */
-        throttleCommand = 1.0;
-        brakeCommand = 0.0;
+        if (
+            aiCurrentSpeed >
+                FOLLOW_ALIGN_SPEED_LIMIT
+        ) {
+
+            throttleCommand = 0.0;
+            brakeCommand =
+                FOLLOW_ALIGN_BRAKE;
+
+        } else {
+
+            throttleCommand =
+                FOLLOW_ALIGN_THROTTLE;
+
+            brakeCommand = 0.0;
+        }
+
         parkingBrakeCommand = 0.0;
-        aiTargetSpeed = 0.0;
 
         driveReverse = false;
         driveForward = true;
@@ -3923,13 +3761,16 @@ public class GTACore {
         source.sendSuccess(
             () -> Component.literal(
                 String.format(
-                    "Following: %s | locked: %s (%d t) | sharp redirect: %s | error: %.1f deg | lateral: %.1f b",
+                    "Following: %s | mode: %s | error: %.1f deg | confirm: %d/%d | turn: %.0f",
                     followTargetId != null,
-                    followTrajectoryLocked,
-                    followTrajectoryLockedTicks,
-                    followSharpRedirecting,
+                    followBaselineMode ==
+                        FOLLOW_BASELINE_STRAIGHT
+                            ? "STRAIGHT"
+                            : "ALIGNING",
                     followHeadingError,
-                    followLateralOffset
+                    followMisalignmentTicks,
+                    FOLLOW_REALIGN_CONFIRM_TICKS,
+                    followTurnDirection
                 )
             ),
             false
