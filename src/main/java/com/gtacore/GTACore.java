@@ -1073,7 +1073,16 @@ public class GTACore {
                                     + unitDrive.terrainRoute.size()
                             )
                             : "direct"
-                    );
+                    )
+                    + " | error="
+                    + Math.round(unitDrive.followHeadingError)
+                    + " | steer="
+                    + Math.round(unitDrive.steeringCurrent)
+                    + " | throttle="
+                    + Math.round(unitDrive.throttleCommand * 100.0)
+                    + "%"
+                    + " | hardTurn="
+                    + unitDrive.followHardTurnActive;
 
             source.sendSuccess(
                 () ->
