@@ -1,7 +1,9 @@
 package com.gtacore;
 
 import com.mojang.brigadier.Command;
+import com.mojang.brigadier.arguments.StringArgumentType;
 
+import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.MinecraftServer;
@@ -427,6 +429,271 @@ public class GTACore {
         parkingBrakeCommand = 0.0;
     }
 
+    private static int saveVehicleTemplateCommand(
+        CommandSourceStack source,
+        String templateName
+    ) {
+
+        if (selectedCar == null) {
+
+            source.sendFailure(
+                Component.literal(
+                    "Select a fully-built police car first with /gta carselect."
+                )
+            );
+
+            return 0;
+        }
+
+        try {
+
+            Object vehicle =
+                getSelectedVehicle(
+                    source.getServer()
+                );
+
+            if (vehicle == null) {
+
+                source.sendFailure(
+                    Component.literal(
+                        "Selected MTS vehicle is not loaded."
+                    )
+                );
+
+                return 0;
+            }
+
+            int wheels =
+                countMTSPartsByClassName(
+                    vehicle,
+                    "PartGroundDevice"
+                );
+
+            int engines =
+                getEngines(
+                    vehicle
+                ).size();
+
+            if (wheels < 2) {
+
+                source.sendFailure(
+                    Component.literal(
+                        "Template rejected: selected car does not have enough installed wheel/ground-device parts."
+                    )
+                );
+
+                return 0;
+            }
+
+            if (engines < 1) {
+
+                source.sendFailure(
+                    Component.literal(
+                        "Template rejected: selected car has no installed engine."
+                    )
+                );
+
+                return 0;
+            }
+
+            java.nio.file.Path savedPath =
+                VehicleTemplateStore
+                    .saveTemplate(
+                        vehicle,
+                        templateName
+                    );
+
+            int savedParts =
+                countAllMTSParts(
+                    vehicle
+                );
+
+            final int finalWheels =
+                wheels;
+
+            final int finalParts =
+                savedParts;
+
+            source.sendSuccess(
+                () ->
+                    Component.literal(
+                        "Saved template '"
+                            + templateName
+                            + "' with "
+                            + finalWheels
+                            + " wheel/ground-device parts and "
+                            + finalParts
+                            + " total parts. File: "
+                            + savedPath
+                                .toString()
+                    ),
+                false
+            );
+
+            return Command.SINGLE_SUCCESS;
+
+        } catch (Exception e) {
+
+            e.printStackTrace();
+
+            source.sendFailure(
+                Component.literal(
+                    "Could not save template '"
+                        + templateName
+                        + "': "
+                        + e.getMessage()
+                )
+            );
+
+            return 0;
+        }
+    }
+
+    private static int spawnVehicleTemplateCommand(
+        CommandSourceStack source,
+        String templateName
+    ) {
+
+        try {
+
+            ServerPlayer player =
+                source.getPlayerOrException();
+
+            VehicleTemplateStore.SpawnedVehicle spawned =
+                VehicleTemplateStore
+                    .spawnTemplate(
+                        player,
+                        templateName
+                    );
+
+            selectedCar =
+                spawned.wrapper
+                    .getUUID();
+
+            Object spawnedVehicle =
+                spawned.internal;
+
+            int spawnedWheels =
+                countMTSPartsByClassName(
+                    spawnedVehicle,
+                    "PartGroundDevice"
+                );
+
+            int spawnedEngines =
+                getEngines(
+                    spawnedVehicle
+                ).size();
+
+            if (
+                spawnedWheels < 2 ||
+                spawnedEngines < 1
+            ) {
+
+                source.sendFailure(
+                    Component.literal(
+                        "Template '"
+                            + templateName
+                            + "' spawned, but required driving parts are missing. Wheels="
+                            + spawnedWheels
+                            + " engines="
+                            + spawnedEngines
+                    )
+                );
+
+                return 0;
+            }
+
+            refillServiceFuel(
+                spawnedVehicle
+            );
+
+            serviceVehicles.add(
+                selectedCar
+            );
+
+            setPoliceEmergencyMode(
+                spawnedVehicle,
+                false
+            );
+
+            resetFollowBaseline();
+
+            driveForward = false;
+            driveReverse = false;
+            returningHome = false;
+            followTargetId = null;
+            wantedLevel = 0;
+            wantedTargetId = null;
+            throttleCommand = 0.0;
+            brakeCommand = 1.0;
+            parkingBrakeCommand = 0.0;
+
+            centerSteeringImmediately(
+                spawnedVehicle
+            );
+
+            setMTSVariable(
+                spawnedVehicle,
+                "throttleVar",
+                0.0
+            );
+
+            setMTSVariable(
+                spawnedVehicle,
+                "brakeVar",
+                1.0
+            );
+
+            setMTSVariable(
+                spawnedVehicle,
+                "parkingBrakeVar",
+                0.0
+            );
+
+            int totalParts =
+                countAllMTSParts(
+                    spawnedVehicle
+                );
+
+            final int finalWheels =
+                spawnedWheels;
+
+            final int finalParts =
+                totalParts;
+
+            source.sendSuccess(
+                () ->
+                    Component.literal(
+                        "Spawned template '"
+                            + templateName
+                            + "' with "
+                            + finalWheels
+                            + " wheel/ground-device parts and "
+                            + finalParts
+                            + " total parts. Cruiser selected."
+                    ),
+                false
+            );
+
+            return Command.SINGLE_SUCCESS;
+
+        } catch (Exception e) {
+
+            e.printStackTrace();
+
+            source.sendFailure(
+                Component.literal(
+                    "Could not spawn template '"
+                        + templateName
+                        + "': "
+                        + e.getMessage()
+                )
+            );
+
+            return 0;
+        }
+    }
+
     // ============================================================
     // COMMANDS
     // ============================================================
@@ -616,282 +883,78 @@ public class GTACore {
                 )
 
                 // ------------------------------------------------
-                // /gta savetemplate
+                // /gta savetemplate [name]
                 //
-                // Permanently saves the selected, fully-equipped MTS
-                // police Mustang to:
+                // Examples:
+                // /gta savetemplate police_mustang
+                // /gta savetemplate police_mercedes
                 //
-                // config/gtacore/templates/police_mustang.nbt
-                //
-                // MTS's full multipart NBT is preserved, including
-                // wheels, engine, seats, lightbar and nested parts.
+                // No name keeps the original convenient default:
+                // police_mustang.
                 // ------------------------------------------------
                 .then(
                     Commands.literal("savetemplate")
-                        .executes(context -> {
-
-                            if (selectedCar == null) {
-
-                                context.getSource()
-                                    .sendFailure(
-                                        Component.literal(
-                                            "Select a fully-built police car first with /gta carselect."
+                        .executes(
+                            context ->
+                                saveVehicleTemplateCommand(
+                                    context.getSource(),
+                                    "police_mustang"
+                                )
+                        )
+                        .then(
+                            Commands.argument(
+                                "name",
+                                StringArgumentType.word()
+                            )
+                                .executes(
+                                    context ->
+                                        saveVehicleTemplateCommand(
+                                            context.getSource(),
+                                            StringArgumentType.getString(
+                                                context,
+                                                "name"
+                                            )
                                         )
-                                    );
-
-                                return 0;
-                            }
-
-                            try {
-
-                                Object vehicle =
-                                    getSelectedVehicle(
-                                        context.getSource()
-                                            .getServer()
-                                    );
-
-                                if (vehicle == null) {
-
-                                    context.getSource()
-                                        .sendFailure(
-                                            Component.literal(
-                                                "Selected MTS vehicle is not loaded."
-                                            )
-                                        );
-
-                                    return 0;
-                                }
-
-                                int wheels =
-                                    countMTSPartsByClassName(
-                                        vehicle,
-                                        "PartGroundDevice"
-                                    );
-
-                                int engines =
-                                    getEngines(
-                                        vehicle
-                                    ).size();
-
-                                if (wheels < 2) {
-
-                                    context.getSource()
-                                        .sendFailure(
-                                            Component.literal(
-                                                "Template rejected: the selected car does not have enough installed wheel/ground-device parts."
-                                            )
-                                        );
-
-                                    return 0;
-                                }
-
-                                if (engines < 1) {
-
-                                    context.getSource()
-                                        .sendFailure(
-                                            Component.literal(
-                                                "Template rejected: the selected car has no installed engine."
-                                            )
-                                        );
-
-                                    return 0;
-                                }
-
-                                java.nio.file.Path savedPath =
-                                    VehicleTemplateStore
-                                        .saveTemplate(
-                                            vehicle,
-                                            "police_mustang"
-                                        );
-
-                                final int savedWheels =
-                                    wheels;
-
-                                final int savedParts =
-                                    countAllMTSParts(
-                                        vehicle
-                                    );
-
-                                context.getSource()
-                                    .sendSuccess(
-                                        () -> Component.literal(
-                                            "Permanent police_mustang template saved with "
-                                                + savedWheels
-                                                + " wheel/ground-device parts and "
-                                                + savedParts
-                                                + " total parts. File: "
-                                                + savedPath
-                                                    .toString()
-                                        ),
-                                        false
-                                    );
-
-                            } catch (Exception e) {
-
-                                e.printStackTrace();
-
-                                context.getSource()
-                                    .sendFailure(
-                                        Component.literal(
-                                            "Could not permanently save police_mustang: "
-                                                + e.getMessage()
-                                        )
-                                    );
-
-                                return 0;
-                            }
-
-                            return Command.SINGLE_SUCCESS;
-                        })
+                                )
+                        )
                 )
 
                 // ------------------------------------------------
-                // /gta spawncruiser
+                // /gta spawncruiser [name]
                 //
-                // Loads police_mustang.nbt from disk and creates a new
-                // MTS vehicle about seven blocks in front of the player.
+                // Examples:
+                // /gta spawncruiser police_mustang
+                // /gta spawncruiser police_mercedes
                 //
-                // UUIDs are regenerated and MTS restores all part_#
-                // entries after spawning, which is what gives the clone
-                // its saved wheels, engine, seats and emergency parts.
+                // The template file itself contains MTS packID,
+                // systemName and subName, so GTACore does not have to
+                // guess what vehicle model the name represents.
                 // ------------------------------------------------
                 .then(
                     Commands.literal("spawncruiser")
-                        .executes(context -> {
-
-                            ServerPlayer player =
-                                context.getSource()
-                                    .getPlayerOrException();
-
-                            try {
-
-                                VehicleTemplateStore.SpawnedVehicle spawned =
-                                    VehicleTemplateStore
-                                        .spawnTemplate(
-                                            player,
-                                            "police_mustang"
-                                        );
-
-                                selectedCar =
-                                    spawned.wrapper
-                                        .getUUID();
-
-                                Object spawnedVehicle =
-                                    spawned.internal;
-
-                                int spawnedWheels =
-                                    countMTSPartsByClassName(
-                                        spawnedVehicle,
-                                        "PartGroundDevice"
-                                    );
-
-                                int spawnedEngines =
-                                    getEngines(
-                                        spawnedVehicle
-                                    ).size();
-
-                                if (
-                                    spawnedWheels < 2 ||
-                                    spawnedEngines < 1
-                                ) {
-
-                                    context.getSource()
-                                        .sendFailure(
-                                            Component.literal(
-                                                "Cruiser spawned, but required driving parts are missing. Wheels="
-                                                    + spawnedWheels
-                                                    + " engines="
-                                                    + spawnedEngines
+                        .executes(
+                            context ->
+                                spawnVehicleTemplateCommand(
+                                    context.getSource(),
+                                    "police_mustang"
+                                )
+                        )
+                        .then(
+                            Commands.argument(
+                                "name",
+                                StringArgumentType.word()
+                            )
+                                .executes(
+                                    context ->
+                                        spawnVehicleTemplateCommand(
+                                            context.getSource(),
+                                            StringArgumentType.getString(
+                                                context,
+                                                "name"
                                             )
-                                        );
-
-                                    return 0;
-                                }
-
-                                refillServiceFuel(
-                                    spawnedVehicle
-                                );
-
-                                serviceVehicles.add(
-                                    selectedCar
-                                );
-
-                                setPoliceEmergencyMode(
-                                    spawnedVehicle,
-                                    false
-                                );
-
-                                resetFollowBaseline();
-
-                                driveForward = false;
-                                driveReverse = false;
-                                returningHome = false;
-                                followTargetId = null;
-                                wantedLevel = 0;
-                                wantedTargetId = null;
-                                throttleCommand = 0.0;
-                                brakeCommand = 1.0;
-                                parkingBrakeCommand = 0.0;
-
-                                centerSteeringImmediately(
-                                    spawnedVehicle
-                                );
-
-                                setMTSVariable(
-                                    spawnedVehicle,
-                                    "throttleVar",
-                                    0.0
-                                );
-
-                                setMTSVariable(
-                                    spawnedVehicle,
-                                    "brakeVar",
-                                    1.0
-                                );
-
-                                setMTSVariable(
-                                    spawnedVehicle,
-                                    "parkingBrakeVar",
-                                    0.0
-                                );
-
-                                final int finalWheelCount =
-                                    spawnedWheels;
-
-                                final int finalPartCount =
-                                    countAllMTSParts(
-                                        spawnedVehicle
-                                    );
-
-                                context.getSource()
-                                    .sendSuccess(
-                                        () -> Component.literal(
-                                            "Spawned and selected permanent police_mustang template with "
-                                                + finalWheelCount
-                                                + " wheel/ground-device parts and "
-                                                + finalPartCount
-                                                + " total parts."
-                                        ),
-                                        false
-                                    );
-
-                            } catch (Exception e) {
-
-                                e.printStackTrace();
-
-                                context.getSource()
-                                    .sendFailure(
-                                        Component.literal(
-                                            "Could not spawn police_mustang template: "
-                                                + e.getMessage()
                                         )
-                                    );
-
-                                return 0;
-                            }
-
-                            return Command.SINGLE_SUCCESS;
-                        })
+                                )
+                        )
                 )
 
                 // ------------------------------------------------
