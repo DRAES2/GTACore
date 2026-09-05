@@ -711,6 +711,330 @@ public class GTACore {
         }
     }
 
+    private static int startManagedWantedPursuit(
+        CommandSourceStack source
+    ) {
+
+        try {
+
+            ServerPlayer target =
+                source.getPlayerOrException();
+
+            /*
+             * Backward-compatible bridge:
+             *
+             * If the user has not spawned a managed cruiser yet, the
+             * currently selected car becomes the first PoliceUnit.
+             */
+            if (
+                policeUnitManager.size() == 0 &&
+                selectedCar != null
+            ) {
+
+                policeUnitManager.registerVehicle(
+                    selectedCar,
+                    "selected_vehicle"
+                );
+            }
+
+            if (
+                policeUnitManager.size() == 0
+            ) {
+
+                source.sendFailure(
+                    Component.literal(
+                        "No police units exist. Spawn one with /gta spawncruiser <template>, or select an existing police car."
+                    )
+                );
+
+                return 0;
+            }
+
+            int readyUnits = 0;
+
+            for (
+                PoliceUnitManager.ManagedUnit managed :
+                policeUnitManager.getUnits()
+            ) {
+
+                UUID vehicleId =
+                    managed.getUnit()
+                        .getVehicleId();
+
+                Object vehicle =
+                    getVehicleByUUID(
+                        source.getServer(),
+                        vehicleId
+                    );
+
+                if (vehicle == null) {
+
+                    managed.getUnit()
+                        .setState(
+                            PoliceState.PATROL
+                        );
+
+                    managed.getUnit()
+                        .setTargetId(
+                            null
+                        );
+
+                    continue;
+                }
+
+                refillServiceFuel(
+                    vehicle
+                );
+
+                serviceVehicles.add(
+                    vehicleId
+                );
+
+                ensureVehicleStarted(
+                    vehicle
+                );
+
+                setPoliceEmergencyMode(
+                    vehicle,
+                    true
+                );
+
+                setWantedPursuitPower(
+                    vehicle,
+                    true
+                );
+
+                managed.getDrive()
+                    .reset();
+
+                readyUnits++;
+            }
+
+            if (readyUnits == 0) {
+
+                source.sendFailure(
+                    Component.literal(
+                        "Police units are registered, but none of their vehicles are currently loaded."
+                    )
+                );
+
+                return 0;
+            }
+
+            wantedLevel = 1;
+
+            wantedTargetId =
+                target.getUUID();
+
+            /*
+             * Managed units own pursuit control now.  Do not also run
+             * the old one-car global follow path or the selected unit
+             * would receive two control updates per tick.
+             */
+            followTargetId = null;
+            returningHome = false;
+            homeRouteIndex = -1;
+
+            policeUnitManager.dispatchAll(
+                wantedTargetId
+            );
+
+            final int dispatched =
+                readyUnits;
+
+            source.sendSuccess(
+                () ->
+                    Component.literal(
+                        "WANTED level 1: dispatched "
+                            + dispatched
+                            + " independent police unit"
+                            + (
+                                dispatched == 1
+                                    ? "."
+                                    : "s."
+                            )
+                    ),
+                false
+            );
+
+            return Command.SINGLE_SUCCESS;
+
+        } catch (Exception e) {
+
+            e.printStackTrace();
+
+            source.sendFailure(
+                Component.literal(
+                    "Could not start managed wanted pursuit: "
+                        + e.getMessage()
+                )
+            );
+
+            return 0;
+        }
+    }
+
+    private static int clearManagedWantedPursuit(
+        CommandSourceStack source
+    ) {
+
+        for (
+            PoliceUnitManager.ManagedUnit managed :
+            policeUnitManager.getUnits()
+        ) {
+
+            try {
+
+                UUID vehicleId =
+                    managed.getUnit()
+                        .getVehicleId();
+
+                Object vehicle =
+                    getVehicleByUUID(
+                        source.getServer(),
+                        vehicleId
+                    );
+
+                if (vehicle == null) {
+                    continue;
+                }
+
+                setPoliceEmergencyMode(
+                    vehicle,
+                    false
+                );
+
+                setWantedPursuitPower(
+                    vehicle,
+                    false
+                );
+
+                setMTSVariable(
+                    vehicle,
+                    "throttleVar",
+                    0.0
+                );
+
+                setMTSVariable(
+                    vehicle,
+                    "brakeVar",
+                    1.0
+                );
+
+                setMTSVariable(
+                    vehicle,
+                    "parkingBrakeVar",
+                    0.0
+                );
+
+                centerSteeringImmediately(
+                    vehicle
+                );
+
+            } catch (Exception e) {
+
+                System.err.println(
+                    "[GTACore] Could not stop police unit "
+                        + managed.getUnit()
+                            .getVehicleId()
+                );
+
+                e.printStackTrace();
+            }
+        }
+
+        policeUnitManager.clearPursuits();
+
+        wantedLevel = 0;
+        wantedTargetId = null;
+        followTargetId = null;
+
+        resetFollowBaseline();
+
+        driveForward = false;
+        driveReverse = false;
+        throttleCommand = 0.0;
+        brakeCommand = 1.0;
+        parkingBrakeCommand = 0.0;
+
+        source.sendSuccess(
+            () ->
+                Component.literal(
+                    "Wanted level cleared. "
+                        + policeUnitManager.size()
+                        + " police unit"
+                        + (
+                            policeUnitManager.size() == 1
+                                ? " remains registered."
+                                : "s remain registered."
+                        )
+                ),
+            false
+        );
+
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static int listPoliceUnits(
+        CommandSourceStack source
+    ) {
+
+        source.sendSuccess(
+            () ->
+                Component.literal(
+                    "Police units: "
+                        + policeUnitManager.size()
+                        + " registered | "
+                        + policeUnitManager.activePursuitCount()
+                        + " pursuing"
+                ),
+            false
+        );
+
+        int index = 1;
+
+        for (
+            PoliceUnitManager.ManagedUnit managed :
+            policeUnitManager.getUnits()
+        ) {
+
+            PoliceUnit unit =
+                managed.getUnit();
+
+            String vehicleText =
+                unit.getVehicleId() == null
+                    ? "none"
+                    : unit.getVehicleId()
+                        .toString()
+                        .substring(
+                            0,
+                            8
+                        );
+
+            final String line =
+                "#"
+                    + index
+                    + " "
+                    + managed.getTemplateName()
+                    + " | vehicle="
+                    + vehicleText
+                    + " | state="
+                    + unit.getState();
+
+            source.sendSuccess(
+                () ->
+                    Component.literal(
+                        line
+                    ),
+                false
+            );
+
+            index++;
+        }
+
+        return Command.SINGLE_SUCCESS;
+    }
+
     // ============================================================
     // COMMANDS
     // ============================================================
