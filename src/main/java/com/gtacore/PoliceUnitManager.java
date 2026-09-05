@@ -270,6 +270,16 @@ public final class PoliceUnitManager {
 
         int transmissionTickCounter;
 
+        /*
+         * Object-detection diagnostics/state for this specific cruiser.
+         */
+        boolean objectDetected;
+        String objectType;
+        double objectDistance;
+        boolean policeVehicleAhead;
+        double formationSideOffset;
+        double formationBackOffset;
+
         DriveState() {
             reset();
         }
@@ -309,6 +319,13 @@ public final class PoliceUnitManager {
             steeringTapDirection = 0.0;
 
             transmissionTickCounter = 0;
+
+            objectDetected = false;
+            objectType = "none";
+            objectDistance = Double.POSITIVE_INFINITY;
+            policeVehicleAhead = false;
+            formationSideOffset = 0.0;
+            formationBackOffset = 0.0;
         }
     }
 }
