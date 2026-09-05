@@ -1063,13 +1063,14 @@ public class GTACore {
                     + vehicleText
                     + " | state="
                     + unit.getState()
-                    + " | road="
+                    + " | nav="
                     + (
-                        unitDrive.roadUsingPath
+                        unitDrive.terrainUsingPath
                             ? (
-                                (unitDrive.roadRouteIndex + 1)
+                                "terrain "
+                                    + (unitDrive.terrainRouteIndex + 1)
                                     + "/"
-                                    + unitDrive.roadRoute.size()
+                                    + unitDrive.terrainRoute.size()
                             )
                             : "direct"
                     );
