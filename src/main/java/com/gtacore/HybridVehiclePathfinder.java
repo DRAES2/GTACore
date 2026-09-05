@@ -153,6 +153,23 @@ public final class HybridVehiclePathfinder {
             }
 
             for (int steering = -1; steering <= 1; steering++) {
+                /*
+                 * This planner is entered specifically when the wanted
+                 * player is behind the cruiser. Do not spend the opening
+                 * states driving straight away from that player. Commit
+                 * immediately to a left or right recovery arc.
+                 */
+                boolean openingRecovery =
+                    current.parent == null ||
+                    current.parent.parent == null;
+
+                if (
+                    openingRecovery &&
+                    steering == 0
+                ) {
+                    continue;
+                }
+
                 SearchState next =
                     advance(
                         level,
@@ -178,10 +195,15 @@ public final class HybridVehiclePathfinder {
                 StateKey nextKey =
                     keyFor(next);
 
+                /*
+                 * A gentle turn is normal vehicle motion, not a major
+                 * penalty. A large turn penalty caused A* to postpone
+                 * steering and send the cruiser straight ahead first.
+                 */
                 double turnCost =
                     steering == 0
                         ? 0.0
-                        : 0.65;
+                        : 0.10;
 
                 double tentative =
                     current.cost +
