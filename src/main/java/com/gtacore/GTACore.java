@@ -10,6 +10,10 @@ import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.world.level.ClipContext;
+import net.minecraft.world.phys.HitResult;
+import net.minecraft.world.phys.Vec3;
 
 import net.minecraftforge.common.MinecraftForge;
 import net.minecraftforge.event.RegisterCommandsEvent;
@@ -323,6 +327,42 @@ public class GTACore {
     private static double aiCurrentSpeed = 0.0;
     private static double brakeCommand = 0.0;
     private static double parkingBrakeCommand = 0.0;
+
+    // ============================================================
+    // PURSUIT OBJECT DETECTION / POLICE SPACING
+    // ============================================================
+
+    /*
+     * First object-detection pass:
+     *
+     * - three forward block rays
+     * - nearby entities/vehicles projected into a forward corridor
+     * - special recognition of other registered PoliceUnits
+     *
+     * Static obstacles currently cause braking rather than pathfinding.
+     * Road-aware avoidance comes later.
+     */
+    private static final double OBJECT_LOOKAHEAD_MIN = 8.0;
+    private static final double OBJECT_LOOKAHEAD_MAX = 20.0;
+    private static final double OBJECT_LOOKAHEAD_SPEED_GAIN = 2.2;
+    private static final double OBJECT_RAY_SIDE_OFFSET = 1.15;
+    private static final double OBJECT_CORRIDOR_HALF_WIDTH = 2.35;
+
+    private static final double POLICE_HARD_SPACING = 5.5;
+    private static final double POLICE_SOFT_SPACING = 10.0;
+    private static final double POLICE_COAST_SPACING = 14.0;
+
+    private static final double STATIC_HARD_BRAKE_DISTANCE = 4.5;
+    private static final double STATIC_SOFT_BRAKE_DISTANCE = 8.5;
+
+    private static boolean pursuitObjectDetected = false;
+    private static String pursuitObjectType = "none";
+    private static double pursuitObjectDistance =
+        Double.POSITIVE_INFINITY;
+    private static boolean pursuitPoliceAhead = false;
+
+    private static double pursuitFormationSideOffset = 0.0;
+    private static double pursuitFormationBackOffset = 0.0;
 
     /*
      * Manual-transmission fallback.  Automatic MTS engines are left
@@ -1023,6 +1063,8 @@ public class GTACore {
                     + index
                     + " "
                     + managed.getTemplateName()
+                    + " | slot="
+                    + managed.getFormationSlot()
                     + " | vehicle="
                     + vehicleText
                     + " | state="
@@ -2487,6 +2529,17 @@ public class GTACore {
                     wrapper
                 );
 
+                if (
+                    followTargetId != null
+                ) {
+
+                    applyPursuitObjectDetection(
+                        server,
+                        vehicle,
+                        wrapper
+                    );
+                }
+
             } else if (returningHome) {
 
                 updateHomeNavigation(
@@ -2911,6 +2964,24 @@ public class GTACore {
 
         state.transmissionTickCounter =
             transmissionTickCounter;
+
+        state.objectDetected =
+            pursuitObjectDetected;
+
+        state.objectType =
+            pursuitObjectType;
+
+        state.objectDistance =
+            pursuitObjectDistance;
+
+        state.policeVehicleAhead =
+            pursuitPoliceAhead;
+
+        state.formationSideOffset =
+            pursuitFormationSideOffset;
+
+        state.formationBackOffset =
+            pursuitFormationBackOffset;
     }
 
     private static void loadPoliceDriveState(
@@ -2988,6 +3059,634 @@ public class GTACore {
 
         transmissionTickCounter =
             state.transmissionTickCounter;
+
+        pursuitObjectDetected =
+            state.objectDetected;
+
+        pursuitObjectType =
+            state.objectType == null
+                ? "none"
+                : state.objectType;
+
+        pursuitObjectDistance =
+            state.objectDistance;
+
+        pursuitPoliceAhead =
+            state.policeVehicleAhead;
+
+        pursuitFormationSideOffset =
+            state.formationSideOffset;
+
+        pursuitFormationBackOffset =
+            state.formationBackOffset;
+    }
+
+    private static double[] getPoliceFormationOffset(
+        ServerPlayer target,
+        int formationSlot,
+        double distanceToTarget
+    ) {
+
+        pursuitFormationSideOffset = 0.0;
+        pursuitFormationBackOffset = 0.0;
+
+        if (formationSlot <= 0) {
+
+            return new double[] {
+                0.0,
+                0.0,
+                0.0,
+                0.0
+            };
+        }
+
+        Vec3 targetMotion =
+            target.getDeltaMovement();
+
+        double forwardX =
+            targetMotion.x;
+
+        double forwardZ =
+            targetMotion.z;
+
+        double movementLength =
+            Math.sqrt(
+                forwardX * forwardX +
+                forwardZ * forwardZ
+            );
+
+        if (movementLength < 0.02) {
+
+            double yawRadians =
+                Math.toRadians(
+                    target.getYRot()
+                );
+
+            forwardX =
+                -Math.sin(
+                    yawRadians
+                );
+
+            forwardZ =
+                Math.cos(
+                    yawRadians
+                );
+
+            movementLength = 1.0;
+        }
+
+        forwardX /=
+            movementLength;
+
+        forwardZ /=
+            movementLength;
+
+        double rightX =
+            -forwardZ;
+
+        double rightZ =
+            forwardX;
+
+        /*
+         * slot 0: lead/center
+         * slot 1: right flank
+         * slot 2: left flank
+         * slot 3: right second row
+         * slot 4: left second row
+         * ...
+         */
+        int pairIndex =
+            formationSlot - 1;
+
+        int row =
+            pairIndex / 2;
+
+        double sideSign =
+            pairIndex % 2 == 0
+                ? 1.0
+                : -1.0;
+
+        double sideOffset =
+            4.25 *
+                sideSign;
+
+        double backOffset =
+            2.0 +
+            row * 6.0;
+
+        /*
+         * Far away, keep the formation influence mild so all units
+         * still efficiently close on the same pursuit.  Near the
+         * target, use the full lane/flank spacing.
+         */
+        double scale;
+
+        if (distanceToTarget >= 40.0) {
+
+            scale = 0.30;
+
+        } else if (distanceToTarget <= 20.0) {
+
+            scale = 1.0;
+
+        } else {
+
+            scale =
+                1.0 -
+                (
+                    distanceToTarget -
+                    20.0
+                ) /
+                20.0 *
+                0.70;
+        }
+
+        sideOffset *=
+            scale;
+
+        backOffset *=
+            scale;
+
+        double worldOffsetX =
+            rightX *
+                sideOffset -
+            forwardX *
+                backOffset;
+
+        double worldOffsetZ =
+            rightZ *
+                sideOffset -
+            forwardZ *
+                backOffset;
+
+        return new double[] {
+            worldOffsetX,
+            worldOffsetZ,
+            sideOffset,
+            backOffset
+        };
+    }
+
+    private static void applyPursuitObjectDetection(
+        MinecraftServer server,
+        Object vehicle,
+        Entity wrapper
+    ) throws Exception {
+
+        pursuitObjectDetected = false;
+        pursuitObjectType = "none";
+        pursuitObjectDistance =
+            Double.POSITIVE_INFINITY;
+        pursuitPoliceAhead = false;
+
+        double[] axes =
+            getVehicleHorizontalAxes(
+                vehicle
+            );
+
+        double forwardX =
+            axes[0];
+
+        double forwardZ =
+            axes[1];
+
+        double rightX =
+            axes[2];
+
+        double rightZ =
+            axes[3];
+
+        double lookAhead =
+            clamp(
+                OBJECT_LOOKAHEAD_MIN +
+                    aiCurrentSpeed *
+                    OBJECT_LOOKAHEAD_SPEED_GAIN,
+                OBJECT_LOOKAHEAD_MIN,
+                OBJECT_LOOKAHEAD_MAX
+            );
+
+        /*
+         * 1) SOLID BLOCK DETECTION
+         *
+         * Three horizontal rays cover left/center/right across the
+         * front of the cruiser.  For now solid blocks cause braking;
+         * a future road/path planner will choose a route around them.
+         */
+        double rayY =
+            wrapper.getY() +
+            Math.max(
+                0.75,
+                wrapper.getBbHeight() *
+                    0.35
+            );
+
+        double nearestBlock =
+            Double.POSITIVE_INFINITY;
+
+        double[] rayOffsets =
+            new double[] {
+                -OBJECT_RAY_SIDE_OFFSET,
+                0.0,
+                OBJECT_RAY_SIDE_OFFSET
+            };
+
+        for (
+            double sideOffset :
+            rayOffsets
+        ) {
+
+            Vec3 start =
+                new Vec3(
+                    wrapper.getX() +
+                        rightX *
+                            sideOffset,
+                    rayY,
+                    wrapper.getZ() +
+                        rightZ *
+                            sideOffset
+                );
+
+            Vec3 end =
+                new Vec3(
+                    start.x +
+                        forwardX *
+                            lookAhead,
+                    start.y,
+                    start.z +
+                        forwardZ *
+                            lookAhead
+                );
+
+            HitResult hit =
+                wrapper.level()
+                    .clip(
+                        new ClipContext(
+                            start,
+                            end,
+                            ClipContext.Block.COLLIDER,
+                            ClipContext.Fluid.NONE,
+                            wrapper
+                        )
+                    );
+
+            if (
+                hit.getType() !=
+                    HitResult.Type.MISS
+            ) {
+
+                double distance =
+                    start.distanceTo(
+                        hit.getLocation()
+                    );
+
+                if (
+                    distance <
+                        nearestBlock
+                ) {
+
+                    nearestBlock =
+                        distance;
+                }
+            }
+        }
+
+        if (
+            nearestBlock <
+                pursuitObjectDistance
+        ) {
+
+            pursuitObjectDetected = true;
+            pursuitObjectType = "block";
+            pursuitObjectDistance =
+                nearestBlock;
+        }
+
+        /*
+         * 2) ENTITY / VEHICLE DETECTION
+         *
+         * Project nearby entities onto the cruiser's forward/right
+         * axes.  Only entities inside the forward corridor count.
+         */
+        ServerPlayer target =
+            followTargetId == null
+                ? null
+                : server.getPlayerList()
+                    .getPlayer(
+                        followTargetId
+                    );
+
+        List<Entity> nearby =
+            wrapper.level()
+                .getEntities(
+                    wrapper,
+                    wrapper.getBoundingBox()
+                        .inflate(
+                            lookAhead + 3.0,
+                            2.5,
+                            lookAhead + 3.0
+                        ),
+                    entity ->
+                        entity != wrapper
+                );
+
+        for (
+            Entity other :
+            nearby
+        ) {
+
+            if (
+                target != null &&
+                other.getUUID()
+                    .equals(
+                        target.getUUID()
+                    )
+            ) {
+
+                continue;
+            }
+
+            double relX =
+                other.getX() -
+                wrapper.getX();
+
+            double relZ =
+                other.getZ() -
+                wrapper.getZ();
+
+            double forwardDistance =
+                relX *
+                    forwardX +
+                relZ *
+                    forwardZ;
+
+            if (
+                forwardDistance <= 0.5 ||
+                forwardDistance >
+                    lookAhead
+            ) {
+
+                continue;
+            }
+
+            double lateralDistance =
+                relX *
+                    rightX +
+                relZ *
+                    rightZ;
+
+            double otherHalfWidth =
+                Math.max(
+                    0.35,
+                    other.getBbWidth() *
+                        0.5
+                );
+
+            double corridor =
+                OBJECT_CORRIDOR_HALF_WIDTH +
+                otherHalfWidth;
+
+            if (
+                Math.abs(
+                    lateralDistance
+                ) >
+                    corridor
+            ) {
+
+                continue;
+            }
+
+            boolean otherPolice =
+                policeUnitManager
+                    .containsVehicle(
+                        other.getUUID()
+                    );
+
+            boolean relevant =
+                otherPolice ||
+                other instanceof LivingEntity ||
+                other.getClass()
+                    .getName()
+                    .equals(
+                        "mcinterface1201.BuilderEntityExisting"
+                    ) ||
+                (
+                    other.getBbWidth() >= 0.7 &&
+                    other.getBbHeight() >= 0.7
+                );
+
+            if (!relevant) {
+                continue;
+            }
+
+            if (
+                forwardDistance <
+                    pursuitObjectDistance
+            ) {
+
+                pursuitObjectDetected = true;
+                pursuitObjectDistance =
+                    forwardDistance;
+
+                if (otherPolice) {
+
+                    pursuitObjectType =
+                        "police_car";
+
+                    pursuitPoliceAhead =
+                        true;
+
+                } else if (
+                    other.getClass()
+                        .getName()
+                        .equals(
+                            "mcinterface1201.BuilderEntityExisting"
+                        )
+                ) {
+
+                    pursuitObjectType =
+                        "vehicle";
+
+                } else {
+
+                    pursuitObjectType =
+                        "entity";
+                }
+            }
+        }
+
+        /*
+         * 3) SAFETY RESPONSE
+         *
+         * Other PoliceUnits use a larger following bubble so cruisers
+         * naturally form a convoy instead of occupying the same space.
+         * The formation offsets above also give pairs distinct left/
+         * right approach lanes near the target.
+         */
+        if (!pursuitObjectDetected) {
+            return;
+        }
+
+        if (pursuitPoliceAhead) {
+
+            if (
+                pursuitObjectDistance <=
+                    POLICE_HARD_SPACING
+            ) {
+
+                throttleCommand = 0.0;
+                brakeCommand = 1.0;
+
+            } else if (
+                pursuitObjectDistance <=
+                    POLICE_SOFT_SPACING
+            ) {
+
+                double urgency =
+                    (
+                        POLICE_SOFT_SPACING -
+                        pursuitObjectDistance
+                    ) /
+                    (
+                        POLICE_SOFT_SPACING -
+                        POLICE_HARD_SPACING
+                    );
+
+                throttleCommand = 0.0;
+
+                brakeCommand =
+                    Math.max(
+                        brakeCommand,
+                        clamp(
+                            0.25 +
+                                urgency *
+                                0.60,
+                            0.25,
+                            0.85
+                        )
+                    );
+
+            } else if (
+                pursuitObjectDistance <=
+                    POLICE_COAST_SPACING
+            ) {
+
+                throttleCommand =
+                    Math.min(
+                        throttleCommand,
+                        0.35
+                    );
+            }
+
+            return;
+        }
+
+        if (
+            pursuitObjectDistance <=
+                STATIC_HARD_BRAKE_DISTANCE
+        ) {
+
+            throttleCommand = 0.0;
+            brakeCommand = 1.0;
+
+        } else if (
+            pursuitObjectDistance <=
+                STATIC_SOFT_BRAKE_DISTANCE
+        ) {
+
+            double urgency =
+                (
+                    STATIC_SOFT_BRAKE_DISTANCE -
+                    pursuitObjectDistance
+                ) /
+                (
+                    STATIC_SOFT_BRAKE_DISTANCE -
+                    STATIC_HARD_BRAKE_DISTANCE
+                );
+
+            throttleCommand = 0.0;
+
+            brakeCommand =
+                Math.max(
+                    brakeCommand,
+                    clamp(
+                        0.30 +
+                            urgency *
+                            0.60,
+                        0.30,
+                        0.90
+                    )
+                );
+
+        } else {
+
+            throttleCommand =
+                Math.min(
+                    throttleCommand,
+                    0.45
+                );
+        }
+    }
+
+    private static double[] getVehicleHorizontalAxes(
+        Object vehicle
+    ) throws Exception {
+
+        Object orientation =
+            getFieldValue(
+                vehicle,
+                "orientation"
+            );
+
+        double forwardX =
+            -getDoubleField(
+                orientation,
+                "m02"
+            );
+
+        double forwardZ =
+            -getDoubleField(
+                orientation,
+                "m22"
+            );
+
+        double length =
+            Math.sqrt(
+                forwardX * forwardX +
+                forwardZ * forwardZ
+            );
+
+        if (length < 0.001) {
+
+            return new double[] {
+                0.0,
+                1.0,
+                -1.0,
+                0.0
+            };
+        }
+
+        forwardX /=
+            length;
+
+        forwardZ /=
+            length;
+
+        /*
+         * Right-hand vector in X/Z.
+         * If forward is north (0,-1), right becomes east (+1,0).
+         */
+        double rightX =
+            -forwardZ;
+
+        double rightZ =
+            forwardX;
+
+        return new double[] {
+            forwardX,
+            forwardZ,
+            rightX,
+            rightZ
+        };
     }
 
     // ============================================================
@@ -3048,12 +3747,72 @@ public class GTACore {
             return;
         }
 
+        double targetX =
+            target.getX();
+
+        double targetZ =
+            target.getZ();
+
+        /*
+         * Managed cruisers get distinct approach points around the
+         * target.  The first unit stays centered; later units take
+         * alternating left/right trailing slots so multiple cruisers
+         * do not all aim for the exact same point.
+         */
+        double baseDx =
+            targetX -
+            wrapper.getX();
+
+        double baseDz =
+            targetZ -
+            wrapper.getZ();
+
+        double baseDistance =
+            Math.sqrt(
+                baseDx * baseDx +
+                baseDz * baseDz
+            );
+
+        if (
+            processingManagedPoliceUnit &&
+            selectedCar != null
+        ) {
+
+            PoliceUnitManager.ManagedUnit managed =
+                policeUnitManager
+                    .getByVehicle(
+                        selectedCar
+                    );
+
+            if (managed != null) {
+
+                double[] offset =
+                    getPoliceFormationOffset(
+                        target,
+                        managed.getFormationSlot(),
+                        baseDistance
+                    );
+
+                targetX +=
+                    offset[0];
+
+                targetZ +=
+                    offset[1];
+
+                pursuitFormationSideOffset =
+                    offset[2];
+
+                pursuitFormationBackOffset =
+                    offset[3];
+            }
+        }
+
         double dx =
-            target.getX() -
+            targetX -
             wrapper.getX();
 
         double dz =
-            target.getZ() -
+            targetZ -
             wrapper.getZ();
 
         double distance =
