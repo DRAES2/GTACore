@@ -618,8 +618,13 @@ public class GTACore {
                 // ------------------------------------------------
                 // /gta savetemplate
                 //
-                // Saves the currently selected, fully-equipped MTS
-                // vehicle as the police cruiser factory template.
+                // Permanently saves the selected, fully-equipped MTS
+                // police Mustang to:
+                //
+                // config/gtacore/templates/police_mustang.nbt
+                //
+                // MTS's full multipart NBT is preserved, including
+                // wheels, engine, seats, lightbar and nested parts.
                 // ------------------------------------------------
                 .then(
                     Commands.literal("savetemplate")
@@ -673,7 +678,7 @@ public class GTACore {
                                     context.getSource()
                                         .sendFailure(
                                             Component.literal(
-                                                "Template rejected: this car does not have enough installed ground-device/wheel parts."
+                                                "Template rejected: the selected car does not have enough installed wheel/ground-device parts."
                                             )
                                         );
 
@@ -685,31 +690,38 @@ public class GTACore {
                                     context.getSource()
                                         .sendFailure(
                                             Component.literal(
-                                                "Template rejected: this car has no installed engine."
+                                                "Template rejected: the selected car has no installed engine."
                                             )
                                         );
 
                                     return 0;
                                 }
 
-                                savePoliceVehicleTemplate(
-                                    vehicle
-                                );
+                                java.nio.file.Path savedPath =
+                                    VehicleTemplateStore
+                                        .saveTemplate(
+                                            vehicle,
+                                            "police_mustang"
+                                        );
 
                                 final int savedWheels =
-                                    policeVehicleTemplateWheelCount;
+                                    wheels;
 
                                 final int savedParts =
-                                    policeVehicleTemplatePartCount;
+                                    countAllMTSParts(
+                                        vehicle
+                                    );
 
                                 context.getSource()
                                     .sendSuccess(
                                         () -> Component.literal(
-                                            "Police cruiser template saved: "
+                                            "Permanent police_mustang template saved with "
                                                 + savedWheels
-                                                + " wheel/ground-device parts, "
+                                                + " wheel/ground-device parts and "
                                                 + savedParts
-                                                + " total installed parts."
+                                                + " total parts. File: "
+                                                + savedPath
+                                                    .toString()
                                         ),
                                         false
                                     );
@@ -721,7 +733,8 @@ public class GTACore {
                                 context.getSource()
                                     .sendFailure(
                                         Component.literal(
-                                            "Could not save the MTS police vehicle template."
+                                            "Could not permanently save police_mustang: "
+                                                + e.getMessage()
                                         )
                                     );
 
@@ -735,27 +748,16 @@ public class GTACore {
                 // ------------------------------------------------
                 // /gta spawncruiser
                 //
-                // Spawns a complete copy of the saved template about
-                // six blocks in front of the player.
+                // Loads police_mustang.nbt from disk and creates a new
+                // MTS vehicle about seven blocks in front of the player.
+                //
+                // UUIDs are regenerated and MTS restores all part_#
+                // entries after spawning, which is what gives the clone
+                // its saved wheels, engine, seats and emergency parts.
                 // ------------------------------------------------
                 .then(
                     Commands.literal("spawncruiser")
                         .executes(context -> {
-
-                            if (
-                                policeVehicleTemplateItem == null ||
-                                policeVehicleTemplateTag == null
-                            ) {
-
-                                context.getSource()
-                                    .sendFailure(
-                                        Component.literal(
-                                            "No police cruiser template saved. Build one, /gta carselect, then /gta savetemplate."
-                                        )
-                                    );
-
-                                return 0;
-                            }
 
                             ServerPlayer player =
                                 context.getSource()
@@ -763,30 +765,19 @@ public class GTACore {
 
                             try {
 
-                                Entity spawnedWrapper =
-                                    spawnPoliceCruiserFromTemplate(
-                                        player
-                                    );
-
-                                if (spawnedWrapper == null) {
-
-                                    context.getSource()
-                                        .sendFailure(
-                                            Component.literal(
-                                                "MTS did not return a spawned vehicle wrapper."
-                                            )
+                                VehicleTemplateStore.SpawnedVehicle spawned =
+                                    VehicleTemplateStore
+                                        .spawnTemplate(
+                                            player,
+                                            "police_mustang"
                                         );
 
-                                    return 0;
-                                }
-
                                 selectedCar =
-                                    spawnedWrapper.getUUID();
+                                    spawned.wrapper
+                                        .getUUID();
 
                                 Object spawnedVehicle =
-                                    getInternalMTSEntity(
-                                        spawnedWrapper
-                                    );
+                                    spawned.internal;
 
                                 int spawnedWheels =
                                     countMTSPartsByClassName(
@@ -794,19 +785,23 @@ public class GTACore {
                                         "PartGroundDevice"
                                     );
 
+                                int spawnedEngines =
+                                    getEngines(
+                                        spawnedVehicle
+                                    ).size();
+
                                 if (
-                                    spawnedWheels <
-                                        policeVehicleTemplateWheelCount
+                                    spawnedWheels < 2 ||
+                                    spawnedEngines < 1
                                 ) {
 
                                     context.getSource()
                                         .sendFailure(
                                             Component.literal(
-                                                "Cruiser spawned, but not all wheel parts were restored. Expected "
-                                                    + policeVehicleTemplateWheelCount
-                                                    + ", found "
+                                                "Cruiser spawned, but required driving parts are missing. Wheels="
                                                     + spawnedWheels
-                                                    + "."
+                                                    + " engines="
+                                                    + spawnedEngines
                                             )
                                         );
 
@@ -827,6 +822,7 @@ public class GTACore {
                                 );
 
                                 resetFollowBaseline();
+
                                 driveForward = false;
                                 driveReverse = false;
                                 returningHome = false;
@@ -853,15 +849,28 @@ public class GTACore {
                                     1.0
                                 );
 
+                                setMTSVariable(
+                                    spawnedVehicle,
+                                    "parkingBrakeVar",
+                                    0.0
+                                );
+
                                 final int finalWheelCount =
                                     spawnedWheels;
+
+                                final int finalPartCount =
+                                    countAllMTSParts(
+                                        spawnedVehicle
+                                    );
 
                                 context.getSource()
                                     .sendSuccess(
                                         () -> Component.literal(
-                                            "Police cruiser spawned and selected with "
+                                            "Spawned and selected permanent police_mustang template with "
                                                 + finalWheelCount
-                                                + " wheel/ground-device parts."
+                                                + " wheel/ground-device parts and "
+                                                + finalPartCount
+                                                + " total parts."
                                         ),
                                         false
                                     );
@@ -873,7 +882,8 @@ public class GTACore {
                                 context.getSource()
                                     .sendFailure(
                                         Component.literal(
-                                            "Could not spawn the police cruiser template."
+                                            "Could not spawn police_mustang template: "
+                                                + e.getMessage()
                                         )
                                     );
 
