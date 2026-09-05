@@ -5,6 +5,7 @@ import com.mojang.brigadier.arguments.StringArgumentType;
 import com.mojang.brigadier.arguments.IntegerArgumentType;
 
 import net.minecraft.commands.CommandSourceStack;
+import net.minecraft.core.BlockPos;
 import net.minecraft.commands.Commands;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.MinecraftServer;
@@ -3475,7 +3476,7 @@ public class GTACore {
                     managed.getDrive()
                 );
 
-                configureManagedRoadNavigation(
+                configureManagedTerrainNavigation(
                     server,
                     managed,
                     targetId
@@ -3706,6 +3707,172 @@ public class GTACore {
 
         transmissionTickCounter =
             state.transmissionTickCounter;
+    }
+
+    /*
+     * Creates a temporary A* route from the blocks around this cruiser.
+     * Recorded road nodes are not required. The route feeds one waypoint
+     * at a time into the existing, validated MTS driving controller.
+     */
+    private static void configureManagedTerrainNavigation(
+        MinecraftServer server,
+        PoliceUnitManager.ManagedUnit managed,
+        UUID targetId
+    ) {
+
+        roadNavigationOverrideActive = false;
+
+        try {
+            if (
+                managed == null ||
+                targetId == null ||
+                selectedCar == null
+            ) {
+                return;
+            }
+
+            ServerPlayer target =
+                server.getPlayerList().getPlayer(targetId);
+
+            Entity wrapper =
+                getSelectedWrapper(server);
+
+            Object vehicle =
+                getSelectedVehicle(server);
+
+            if (
+                target == null ||
+                wrapper == null ||
+                vehicle == null ||
+                target.level().dimension() !=
+                    wrapper.level().dimension() ||
+                !(wrapper.level() instanceof ServerLevel)
+            ) {
+                managed.getDrive().terrainUsingPath = false;
+                return;
+            }
+
+            ServerLevel level =
+                (ServerLevel) wrapper.level();
+
+            PoliceUnitManager.DriveState drive =
+                managed.getDrive();
+
+            BlockPos destination =
+                target.blockPosition();
+
+            drive.terrainRepathTicks++;
+
+            boolean routeMissing =
+                drive.terrainRoute.isEmpty();
+
+            boolean destinationMoved =
+                drive.terrainDestination == null ||
+                drive.terrainDestination.distSqr(destination) > 64.0;
+
+            boolean timedRepath =
+                drive.terrainRepathTicks >=
+                    ROAD_REPATH_INTERVAL_TICKS;
+
+            if (
+                routeMissing ||
+                destinationMoved ||
+                timedRepath
+            ) {
+                /*
+                 * Begin the temporary grid ahead of the physical nose.
+                 * The first waypoint therefore remains forward-biased
+                 * when the player crosses behind the car. A* then bends
+                 * the remaining route back toward the player.
+                 */
+                double[] forward =
+                    getVehicleForwardXZ(vehicle);
+
+                double pathStartX =
+                    wrapper.getX() + forward[0] * 12.0;
+
+                double pathStartZ =
+                    wrapper.getZ() + forward[1] * 12.0;
+
+                List<BlockPos> newRoute =
+                    TerrainPathfinder.findPath(
+                        level,
+                        pathStartX,
+                        pathStartZ,
+                        target.getX(),
+                        target.getZ()
+                    );
+
+                drive.terrainRoute.clear();
+                drive.terrainRoute.addAll(newRoute);
+                drive.terrainRouteIndex = 0;
+                drive.terrainRepathTicks = 0;
+                drive.terrainDestination = destination;
+                drive.terrainUsingPath =
+                    !newRoute.isEmpty();
+            }
+
+            if (
+                !drive.terrainUsingPath ||
+                drive.terrainRoute.isEmpty()
+            ) {
+                return;
+            }
+
+            while (
+                drive.terrainRouteIndex <
+                    drive.terrainRoute.size()
+            ) {
+                BlockPos waypoint =
+                    drive.terrainRoute.get(
+                        drive.terrainRouteIndex
+                    );
+
+                double waypointX =
+                    waypoint.getX() + 0.5;
+
+                double waypointZ =
+                    waypoint.getZ() + 0.5;
+
+                double dx =
+                    waypointX - wrapper.getX();
+
+                double dz =
+                    waypointZ - wrapper.getZ();
+
+                double distance =
+                    Math.sqrt(dx * dx + dz * dz);
+
+                boolean finalWaypoint =
+                    drive.terrainRouteIndex >=
+                        drive.terrainRoute.size() - 1;
+
+                if (distance <= 5.5) {
+                    if (!finalWaypoint) {
+                        drive.terrainRouteIndex++;
+                        continue;
+                    }
+
+                    // Use normal direct pursuit for the final few blocks.
+                    drive.terrainUsingPath = false;
+                    return;
+                }
+
+                roadNavigationTargetX = waypointX;
+                roadNavigationTargetZ = waypointZ;
+                roadNavigationOverrideActive = true;
+                return;
+            }
+
+        } catch (Exception e) {
+            roadNavigationOverrideActive = false;
+            managed.getDrive().terrainUsingPath = false;
+
+            System.err.println(
+                "[GTACore] Terrain path update failed:"
+            );
+            e.printStackTrace();
+        }
     }
 
     private static void configureManagedRoadNavigation(
