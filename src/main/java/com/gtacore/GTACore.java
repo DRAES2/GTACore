@@ -1048,6 +1048,9 @@ public class GTACore {
             PoliceUnit unit =
                 managed.getUnit();
 
+            PoliceUnitManager.DriveState unitDrive =
+                managed.getDrive();
+
             String vehicleText =
                 unit.getVehicleId() == null
                     ? "none"
@@ -1068,7 +1071,20 @@ public class GTACore {
                     + " | vehicle="
                     + vehicleText
                     + " | state="
-                    + unit.getState();
+                    + unit.getState()
+                    + " | detect="
+                    + (
+                        unitDrive.objectDetected
+                            ? (
+                                unitDrive.objectType
+                                    + "@"
+                                    + String.format(
+                                        "%.1f",
+                                        unitDrive.objectDistance
+                                    )
+                            )
+                            : "none"
+                    );
 
             source.sendSuccess(
                 () ->
