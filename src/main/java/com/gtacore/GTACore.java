@@ -234,8 +234,23 @@ public class GTACore {
     private static final double FOLLOW_HARD_TURN_BRAKE = 1.0;
     private static final double FOLLOW_HARD_TURN_THROTTLE = 0.42;
 
+    /*
+     * Catch-up advantage:
+     *
+     * If the target is already turning away faster than the cruiser can
+     * rotate, do not wait all the way until 85 degrees.  Once the error
+     * is moderately large and is still growing for several ticks, snap
+     * directly to full steering lock.
+     */
+    private static final double FOLLOW_HARD_TURN_CATCHUP_START_DEGREES = 45.0;
+    private static final double FOLLOW_HARD_TURN_ERROR_GROWTH_DEGREES = 1.0;
+    private static final int FOLLOW_HARD_TURN_GROWTH_CONFIRM_TICKS = 3;
+
     private static boolean followHardTurnActive = false;
+    private static boolean followHardTurnCatchup = false;
     private static int followHardTurnConfirmTicks = 0;
+    private static int followHardTurnGrowthTicks = 0;
+    private static double followPreviousAbsoluteError = 0.0;
 
 
     /*
@@ -384,7 +399,10 @@ public class GTACore {
         followSteerPulseTick = 0;
         followDigitalSteeringActive = false;
         followHardTurnActive = false;
+        followHardTurnCatchup = false;
         followHardTurnConfirmTicks = 0;
+        followHardTurnGrowthTicks = 0;
+        followPreviousAbsoluteError = 0.0;
         parkingBrakeCommand = 0.0;
     }
 
@@ -2143,21 +2161,33 @@ public class GTACore {
             );
 
         /*
-         * Detect a turn that normal tap-steering cannot physically
-         * make at the current speed.
+         * Detect a turn that normal tap-steering cannot physically make.
          *
-         * 85 degrees is intentionally much higher than the normal
-         * realignment threshold.  This keeps the working normal
-         * driving behavior completely separate from hard turns.
+         * Two ways to enter:
+         *
+         * 1) Classic hard turn: target reaches 85+ degrees.
+         * 2) Catch-up turn: target is already 45+ degrees off and the
+         *    error keeps GROWING, meaning the player is turning away
+         *    faster than our normal steering can catch up.
          */
         if (!followHardTurnActive) {
 
-            if (
+            boolean classicHardTurn =
                 absoluteError >=
                     FOLLOW_HARD_TURN_START_DEGREES &&
                 aiCurrentSpeed >=
-                    FOLLOW_HARD_TURN_MIN_SPEED
-            ) {
+                    FOLLOW_HARD_TURN_MIN_SPEED;
+
+            boolean errorStillGrowing =
+                absoluteError >=
+                    FOLLOW_HARD_TURN_CATCHUP_START_DEGREES &&
+                (
+                    absoluteError -
+                    followPreviousAbsoluteError
+                ) >=
+                    FOLLOW_HARD_TURN_ERROR_GROWTH_DEGREES;
+
+            if (classicHardTurn) {
 
                 followHardTurnConfirmTicks++;
 
@@ -2166,13 +2196,34 @@ public class GTACore {
                 followHardTurnConfirmTicks = 0;
             }
 
-            if (
+            if (errorStillGrowing) {
+
+                followHardTurnGrowthTicks++;
+
+            } else {
+
+                followHardTurnGrowthTicks = 0;
+            }
+
+            boolean classicConfirmed =
                 followHardTurnConfirmTicks >=
-                    FOLLOW_HARD_TURN_CONFIRM_TICKS
+                    FOLLOW_HARD_TURN_CONFIRM_TICKS;
+
+            boolean catchupConfirmed =
+                followHardTurnGrowthTicks >=
+                    FOLLOW_HARD_TURN_GROWTH_CONFIRM_TICKS;
+
+            if (
+                classicConfirmed ||
+                catchupConfirmed
             ) {
 
                 followHardTurnActive = true;
+                followHardTurnCatchup =
+                    catchupConfirmed;
+
                 followHardTurnConfirmTicks = 0;
+                followHardTurnGrowthTicks = 0;
 
                 followBaselineMode =
                     FOLLOW_TURNING;
@@ -2193,6 +2244,9 @@ public class GTACore {
             }
         }
 
+        followPreviousAbsoluteError =
+            absoluteError;
+
         if (followHardTurnActive) {
 
             /*
@@ -2201,10 +2255,9 @@ public class GTACore {
              * Keep measuring the real heading every tick; there is
              * no guessed turn duration.
              */
-            setFollowDigitalSteering(
+            setFollowHardSteeringInstant(
                 vehicle,
-                followTurnDirection *
-                    FOLLOW_FULL_STEER
+                followTurnDirection
             );
 
             boolean crossedTargetHeading =
@@ -2221,6 +2274,7 @@ public class GTACore {
                  * an opposite correction.
                  */
                 followHardTurnActive = false;
+                followHardTurnCatchup = false;
                 followBaselineMode =
                     FOLLOW_STRAIGHT;
 
@@ -2228,9 +2282,8 @@ public class GTACore {
                 followSteerPulseTick = 0;
                 followMisalignmentTicks = 0;
 
-                setFollowDigitalSteering(
-                    vehicle,
-                    0.0
+                centerSteeringImmediately(
+                    vehicle
                 );
 
                 applyFollowLongitudinalControl(
@@ -2261,6 +2314,7 @@ public class GTACore {
                  * long and overshooting.
                  */
                 followHardTurnActive = false;
+                followHardTurnCatchup = false;
                 followBaselineMode =
                     FOLLOW_TURNING;
 
@@ -4330,6 +4384,37 @@ public class GTACore {
     // STEERING
     // ============================================================
 
+    private static void setFollowHardSteeringInstant(
+        Object vehicle,
+        double direction
+    ) throws Exception {
+
+        /*
+         * Police-only hard-turn advantage.
+         *
+         * Normal corrections emulate player keyboard steering and move
+         * only a few degrees per tick.  Hard-turn mode is different:
+         * snap directly to full left/right lock so a late-starting
+         * cruiser can catch a target that is already rotating away.
+         */
+        double hardLock =
+            direction >= 0.0
+                ? FOLLOW_FULL_STEER
+                : -FOLLOW_FULL_STEER;
+
+        steeringTarget =
+            hardLock;
+
+        steeringCurrent =
+            hardLock;
+
+        setMTSVariable(
+            vehicle,
+            "rudderInputVar",
+            hardLock
+        );
+    }
+
     private static void setFollowDigitalSteering(
         Object vehicle,
         double steering
@@ -5557,13 +5642,14 @@ public class GTACore {
         source.sendSuccess(
             () -> Component.literal(
                 String.format(
-                    "Following: %s | mode: %s | hard turn: %s | heading error: %.1f deg | turn side: %.0f | feedback tap: %d",
+                    "Following: %s | mode: %s | hard turn: %s | catch-up: %s | heading error: %.1f deg | turn side: %.0f | feedback tap: %d",
                     followTargetId != null,
                     followBaselineMode ==
                         FOLLOW_STRAIGHT
                             ? "STRAIGHT"
                             : "TURNING",
                     followHardTurnActive,
+                    followHardTurnCatchup,
                     followHeadingError,
                     followTurnDirection,
                     followSteerPulseTick
