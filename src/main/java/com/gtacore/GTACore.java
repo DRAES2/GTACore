@@ -166,13 +166,26 @@ public class GTACore {
      * The wide gap between ENTER and EXIT is deliberate hysteresis.
      * It prevents tiny target motion from causing left/right twitching.
      */
-    private static final double FOLLOW_ALIGNMENT_ENTER_DEGREES = 8.0;
-    private static final double FOLLOW_ALIGNMENT_EXIT_DEGREES = 20.0;
-    private static final double FOLLOW_ALIGNMENT_MAX_STEERING = 18.0;
-    private static final double FOLLOW_ALIGNMENT_MIN_STEERING = 4.0;
+    private static final double FOLLOW_ALIGNMENT_ENTER_DEGREES = 12.0;
+    private static final double FOLLOW_ALIGNMENT_MAX_STEERING = 14.0;
+    private static final double FOLLOW_ALIGNMENT_MIN_STEERING = 3.0;
+
+    /*
+     * Straight-follow is now based on a ROAD/CORRIDOR idea rather
+     * than constantly aiming at the player's exact point.
+     *
+     * Once the player is inside this forward corridor, the wheel is
+     * held at exactly zero.  The player has to move meaningfully out
+     * of the corridor before steering is allowed again.
+     */
+    private static final double FOLLOW_CORRIDOR_ENTER_BLOCKS = 2.5;
+    private static final double FOLLOW_CORRIDOR_EXIT_BLOCKS = 5.5;
+    private static final int FOLLOW_LOCK_MIN_TICKS = 30;
 
     private static boolean followTrajectoryLocked = false;
+    private static int followTrajectoryLockedTicks = 0;
     private static double followHeadingError = 0.0;
+    private static double followLateralOffset = 0.0;
 
     /*
      * SHARP REDIRECT
@@ -448,7 +461,9 @@ public class GTACore {
                             followTurnPhase = FOLLOW_TURN_FOLLOW;
                             followTurnDirection = 1.0;
                             followTrajectoryLocked = false;
+                            followTrajectoryLockedTicks = 0;
                             followHeadingError = 0.0;
+                            followLateralOffset = 0.0;
                             followSharpRedirecting = false;
                             followDriftPulseTicksRemaining = 0;
                             parkingBrakeCommand = 0.0;
@@ -1080,7 +1095,9 @@ public class GTACore {
                             followTurnTicks = 0;
                             followTurnCooldownTicks = 0;
                             followTrajectoryLocked = false;
+                            followTrajectoryLockedTicks = 0;
                             followHeadingError = 0.0;
+                            followLateralOffset = 0.0;
                             followSharpRedirecting = false;
                             followDriftPulseTicksRemaining = 0;
                             parkingBrakeCommand = 0.0;
@@ -1108,7 +1125,9 @@ public class GTACore {
                             followTurnTicks = 0;
                             followTurnCooldownTicks = 0;
                             followTrajectoryLocked = false;
+                            followTrajectoryLockedTicks = 0;
                             followHeadingError = 0.0;
+                            followLateralOffset = 0.0;
                             followSharpRedirecting = false;
                             followDriftPulseTicksRemaining = 0;
                             parkingBrakeCommand = 0.0;
@@ -1674,6 +1693,7 @@ public class GTACore {
 
             followTargetId = null;
             followTrajectoryLocked = false;
+            followTrajectoryLockedTicks = 0;
             followSharpRedirecting = false;
             followDriftPulseTicksRemaining = 0;
             followHeadingError = 0.0;
@@ -1697,6 +1717,7 @@ public class GTACore {
         ) {
 
             followTrajectoryLocked = false;
+            followTrajectoryLockedTicks = 0;
             followSharpRedirecting = false;
             followDriftPulseTicksRemaining = 0;
             followHeadingError = 0.0;
@@ -1745,6 +1766,8 @@ public class GTACore {
             parkingBrakeCommand = 0.0;
 
             followTrajectoryLocked = true;
+            followTrajectoryLockedTicks = 0;
+            followLateralOffset = 0.0;
             followSharpRedirecting = false;
             followDriftPulseTicksRemaining = 0;
 
@@ -1768,6 +1791,27 @@ public class GTACore {
             );
 
         /*
+         * Signed sideways distance from the car's current forward
+         * trajectory to the player.
+         *
+         * This is the key anti-zig-zag measurement.  A player can be
+         * a few degrees off-center without requiring another steering
+         * correction if they are still inside the same general lane.
+         */
+        followLateralOffset =
+            distance *
+            Math.sin(
+                Math.toRadians(
+                    followHeadingError
+                )
+            );
+
+        double absoluteLateralOffset =
+            Math.abs(
+                followLateralOffset
+            );
+
+        /*
          * A sudden large heading change enters SHARP REDIRECT mode.
          * This mode is intentionally separate from normal follow
          * steering so the car can react aggressively without causing
@@ -1781,6 +1825,7 @@ public class GTACore {
 
             followSharpRedirecting = true;
             followTrajectoryLocked = false;
+            followTrajectoryLockedTicks = 0;
             followDriftPulseTicksRemaining = 0;
         }
 
@@ -1866,6 +1911,7 @@ public class GTACore {
 
                 followSharpRedirecting = false;
                 followTrajectoryLocked = true;
+                followTrajectoryLockedTicks = 0;
                 parkingBrakeCommand = 0.0;
                 brakeCommand = 0.0;
                 throttleCommand = 1.0;
@@ -1883,12 +1929,28 @@ public class GTACore {
 
         /*
          * Normal trajectory-lock behavior.
+         *
+         * LOCKED means "drive this line", not "point exactly at the
+         * player every tick".
          */
         if (followTrajectoryLocked) {
 
+            followTrajectoryLockedTicks++;
+
+            boolean minimumLockComplete =
+                followTrajectoryLockedTicks >=
+                    FOLLOW_LOCK_MIN_TICKS;
+
+            /*
+             * During the initial lock period the wheel absolutely
+             * stays centered.  After that, the player still has to
+             * leave the corridor by more than 5.5 blocks before we
+             * allow a new correction.
+             */
             if (
-                absoluteError <
-                    FOLLOW_ALIGNMENT_EXIT_DEGREES
+                !minimumLockComplete ||
+                absoluteLateralOffset <=
+                    FOLLOW_CORRIDOR_EXIT_BLOCKS
             ) {
 
                 centerSteeringImmediately(
@@ -1899,18 +1961,31 @@ public class GTACore {
 
                 followTrajectoryLocked =
                     false;
+
+                followTrajectoryLockedTicks = 0;
             }
         }
 
         if (!followTrajectoryLocked) {
 
-            if (
+            /*
+             * Re-enter straight driving as soon as the player is
+             * generally in front AND inside the narrow corridor.
+             *
+             * We do not wait for perfect alignment.
+             */
+            boolean goodEnoughAlignment =
                 absoluteError <=
-                    FOLLOW_ALIGNMENT_ENTER_DEGREES
-            ) {
+                    FOLLOW_ALIGNMENT_ENTER_DEGREES &&
+                absoluteLateralOffset <=
+                    FOLLOW_CORRIDOR_ENTER_BLOCKS;
+
+            if (goodEnoughAlignment) {
 
                 followTrajectoryLocked =
                     true;
+
+                followTrajectoryLockedTicks = 0;
 
                 centerSteeringImmediately(
                     vehicle
@@ -1921,7 +1996,7 @@ public class GTACore {
                 double requestedSteering =
                     clamp(
                         followHeadingError *
-                            0.30,
+                            0.24,
                         -FOLLOW_ALIGNMENT_MAX_STEERING,
                         FOLLOW_ALIGNMENT_MAX_STEERING
                     );
@@ -3848,11 +3923,13 @@ public class GTACore {
         source.sendSuccess(
             () -> Component.literal(
                 String.format(
-                    "Following: %s | locked: %s | sharp redirect: %s | heading error: %.1f deg",
+                    "Following: %s | locked: %s (%d t) | sharp redirect: %s | error: %.1f deg | lateral: %.1f b",
                     followTargetId != null,
                     followTrajectoryLocked,
+                    followTrajectoryLockedTicks,
                     followSharpRedirecting,
-                    followHeadingError
+                    followHeadingError,
+                    followLateralOffset
                 )
             ),
             false
