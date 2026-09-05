@@ -182,6 +182,28 @@ public class GTACore {
     private static final double FOLLOW_TURN_THROTTLE = 0.38;
 
     /*
+     * SHARP TURN
+     *
+     * If the target suddenly gets far outside the car's current
+     * direction while the car is moving quickly, normal steering taps
+     * are no longer enough.  In that case:
+     *
+     * - latch the correct turn side
+     * - hold full steering continuously
+     * - brake hard until speed is under control
+     * - then release brake and power through the turn
+     * - exit only when real heading feedback says the turn is nearly done
+     */
+    private static final double FOLLOW_SHARP_TURN_START_DEGREES = 55.0;
+    private static final double FOLLOW_SHARP_TURN_EXIT_DEGREES = 28.0;
+    private static final double FOLLOW_SHARP_TURN_MIN_SPEED = 3.0;
+    private static final double FOLLOW_SHARP_TURN_SLOW_SPEED = 1.8;
+    private static final double FOLLOW_SHARP_TURN_BRAKE = 0.88;
+    private static final double FOLLOW_SHARP_TURN_THROTTLE = 0.34;
+
+    private static boolean followSharpTurnActive = false;
+
+    /*
      * FORWARD_ONLY_AUTONOMY
      *
      * Back to basics: autonomous follow/home never use reverse.
@@ -315,6 +337,7 @@ public class GTACore {
         followMisalignmentTicks = 0;
         followSteerPulseTick = 0;
         followDigitalSteeringActive = false;
+        followSharpTurnActive = false;
         parkingBrakeCommand = 0.0;
     }
 
@@ -1350,6 +1373,15 @@ public class GTACore {
             }
 
             /*
+             * Headlights/running lights follow Minecraft time
+             * automatically for the selected GTACore vehicle.
+             */
+            updateAutomaticLights(
+                vehicle,
+                wrapper
+            );
+
+            /*
              * The selected GTACore car is kept physically full every
              * tick.  This happens before any engine-start or AI logic.
              */
@@ -1740,6 +1772,117 @@ public class GTACore {
             Math.abs(
                 followHeadingError
             );
+
+        /*
+         * Enter sharp-turn mode only when BOTH are true:
+         * 1. the target is well outside the car's normal forward arc;
+         * 2. the car is moving fast enough that ordinary tap steering
+         *    would make a huge, slow arc.
+         */
+        if (
+            !followSharpTurnActive &&
+            absoluteError >=
+                FOLLOW_SHARP_TURN_START_DEGREES &&
+            aiCurrentSpeed >=
+                FOLLOW_SHARP_TURN_MIN_SPEED
+        ) {
+
+            followSharpTurnActive = true;
+            followBaselineMode =
+                FOLLOW_TURNING;
+
+            followTurnDirection =
+                Math.signum(
+                    followHeadingError
+                );
+
+            if (
+                followTurnDirection == 0.0
+            ) {
+                followTurnDirection = 1.0;
+            }
+
+            followSteerPulseTick = 0;
+            followMisalignmentTicks = 0;
+        }
+
+        if (followSharpTurnActive) {
+
+            /*
+             * Sharp mode still uses heading feedback, not a timer.
+             * Hold full steering until the actual nose of the vehicle
+             * comes back near the target direction.
+             */
+            setFollowDigitalSteering(
+                vehicle,
+                followTurnDirection *
+                    FOLLOW_FULL_STEER
+            );
+
+            boolean crossedTargetHeading =
+                Math.signum(
+                    followHeadingError
+                ) !=
+                    followTurnDirection;
+
+            if (
+                absoluteError <=
+                    FOLLOW_SHARP_TURN_EXIT_DEGREES ||
+                crossedTargetHeading
+            ) {
+
+                followSharpTurnActive = false;
+                followBaselineMode =
+                    FOLLOW_STRAIGHT;
+
+                followTurnDirection = 0.0;
+                followSteerPulseTick = 0;
+                followMisalignmentTicks = 0;
+
+                setFollowDigitalSteering(
+                    vehicle,
+                    0.0
+                );
+
+                throttleCommand = 1.0;
+                brakeCommand = 0.0;
+                parkingBrakeCommand = 0.0;
+
+                driveReverse = false;
+                driveForward = true;
+
+                return;
+            }
+
+            /*
+             * At high speed: brake hard while holding the turn.
+             * Once slow enough: release the brake and feed power back
+             * in so the car can finish rotating instead of stopping.
+             */
+            if (
+                aiCurrentSpeed >
+                    FOLLOW_SHARP_TURN_SLOW_SPEED
+            ) {
+
+                throttleCommand = 0.0;
+                brakeCommand =
+                    FOLLOW_SHARP_TURN_BRAKE;
+
+            } else {
+
+                throttleCommand =
+                    FOLLOW_SHARP_TURN_THROTTLE;
+
+                brakeCommand = 0.0;
+            }
+
+            parkingBrakeCommand = 0.0;
+
+            driveReverse = false;
+            driveForward = true;
+
+            return;
+        }
 
         // ========================================================
         // STRAIGHT
@@ -2739,6 +2882,81 @@ public class GTACore {
                 value
             )
         );
+    }
+
+    // ============================================================
+    // AUTOMATIC LIGHTS
+    // ============================================================
+
+    private static void updateAutomaticLights(
+        Object vehicle,
+        Entity wrapper
+    ) throws Exception {
+
+        /*
+         * Minecraft day time:
+         * 0      = sunrise
+         * 6000   = noon
+         * 12000  = sunset
+         * 18000  = midnight
+         *
+         * Turn vehicle running lights + headlights on from shortly
+         * after sunset until shortly before sunrise.
+         */
+        long dayTime =
+            wrapper.level()
+                .getDayTime() %
+                24000L;
+
+        boolean night =
+            dayTime >= 13000L &&
+            dayTime < 23000L;
+
+        double lightValue =
+            night
+                ? 1.0
+                : 0.0;
+
+        /*
+         * These are MTS's native car-light variables used by its
+         * normal keyboard control:
+         * runningLightVar and headLightVar.
+         */
+        if (
+            Math.abs(
+                getMTSVariableValue(
+                    vehicle,
+                    "runningLightVar"
+                ) -
+                lightValue
+            ) >
+                0.001
+        ) {
+
+            setMTSVariable(
+                vehicle,
+                "runningLightVar",
+                lightValue
+            );
+        }
+
+        if (
+            Math.abs(
+                getMTSVariableValue(
+                    vehicle,
+                    "headLightVar"
+                ) -
+                lightValue
+            ) >
+                0.001
+        ) {
+
+            setMTSVariable(
+                vehicle,
+                "headLightVar",
+                lightValue
+            );
+        }
     }
 
     // ============================================================
@@ -3864,12 +4082,13 @@ public class GTACore {
         source.sendSuccess(
             () -> Component.literal(
                 String.format(
-                    "Following: %s | mode: %s | heading error: %.1f deg | turn side: %.0f | feedback tap: %d",
+                    "Following: %s | mode: %s | sharp: %s | heading error: %.1f deg | turn side: %.0f | feedback tap: %d",
                     followTargetId != null,
                     followBaselineMode ==
                         FOLLOW_STRAIGHT
                             ? "STRAIGHT"
                             : "TURNING",
+                    followSharpTurnActive,
                     followHeadingError,
                     followTurnDirection,
                     followSteerPulseTick
@@ -3887,6 +4106,28 @@ public class GTACore {
                             selectedCar
                         )
                     )
+            ),
+            false
+        );
+
+        double runningLights =
+            getMTSVariableValue(
+                vehicle,
+                "runningLightVar"
+            );
+
+        double headlights =
+            getMTSVariableValue(
+                vehicle,
+                "headLightVar"
+            );
+
+        source.sendSuccess(
+            () -> Component.literal(
+                "Auto lights: running="
+                    + (runningLights > 0.5)
+                    + " | headlights="
+                    + (headlights > 0.5)
             ),
             false
         );
