@@ -1189,6 +1189,111 @@ public class GTACore {
                 )
 
                 // ------------------------------------------------
+                // /gta emergencyscan
+                //
+                // Diagnostic command.  "siren=true" by itself only
+                // proves that a variable named siren exists; MTS will
+                // happily create a variable even if the vehicle pack
+                // never uses it.  This scans the actual vehicle/parts
+                // definitions for emergency-looking custom variables
+                // and sound-animation variables.
+                // ------------------------------------------------
+                .then(
+                    Commands.literal("emergencyscan")
+                        .executes(context -> {
+
+                            if (selectedCar == null) {
+
+                                context.getSource()
+                                    .sendFailure(
+                                        Component.literal(
+                                            "Select the police car first."
+                                        )
+                                    );
+
+                                return 0;
+                            }
+
+                            try {
+
+                                Object vehicle =
+                                    getSelectedVehicle(
+                                        context.getSource()
+                                            .getServer()
+                                    );
+
+                                if (vehicle == null) {
+
+                                    context.getSource()
+                                        .sendFailure(
+                                            Component.literal(
+                                                "Selected MTS car is not loaded."
+                                            )
+                                        );
+
+                                    return 0;
+                                }
+
+                                List<String> results =
+                                    scanEmergencyVariables(
+                                        vehicle
+                                    );
+
+                                if (results.isEmpty()) {
+
+                                    context.getSource()
+                                        .sendSuccess(
+                                            () -> Component.literal(
+                                                "Emergency scan: no obvious siren/emergency variables found."
+                                            ),
+                                            false
+                                        );
+
+                                } else {
+
+                                    context.getSource()
+                                        .sendSuccess(
+                                            () -> Component.literal(
+                                                "Emergency scan candidates:"
+                                            ),
+                                            false
+                                        );
+
+                                    for (
+                                        String result :
+                                        results
+                                    ) {
+
+                                        context.getSource()
+                                            .sendSuccess(
+                                                () ->
+                                                    Component.literal(
+                                                        result
+                                                    ),
+                                                false
+                                            );
+                                    }
+                                }
+
+                            } catch (Exception e) {
+
+                                e.printStackTrace();
+
+                                context.getSource()
+                                    .sendFailure(
+                                        Component.literal(
+                                            "Emergency variable scan failed."
+                                        )
+                                    );
+
+                                return 0;
+                            }
+
+                            return Command.SINGLE_SUCCESS;
+                        })
+                )
+
+                // ------------------------------------------------
                 // /gta follow
                 //
                 // Makes the selected car autonomously follow the
@@ -3110,6 +3215,278 @@ public class GTACore {
                 maximum,
                 value
             )
+        );
+    }
+
+    private static List<String> scanEmergencyVariables(
+        Object vehicle
+    ) {
+
+        List<String> results =
+            new ArrayList<>();
+
+        scanEmergencyVariablesOnObject(
+            vehicle,
+            "vehicle",
+            results
+        );
+
+        try {
+
+            Object allParts =
+                getFieldValue(
+                    vehicle,
+                    "allParts"
+                );
+
+            if (
+                allParts instanceof Iterable<?>
+            ) {
+
+                int partIndex = 0;
+
+                for (
+                    Object part :
+                    (Iterable<?>) allParts
+                ) {
+
+                    if (part == null) {
+                        continue;
+                    }
+
+                    String label =
+                        "part "
+                            + partIndex
+                            + " "
+                            + part.getClass()
+                                .getSimpleName();
+
+                    scanEmergencyVariablesOnObject(
+                        part,
+                        label,
+                        results
+                    );
+
+                    partIndex++;
+                }
+            }
+
+        } catch (Exception ignored) {
+        }
+
+        return results;
+    }
+
+    private static void scanEmergencyVariablesOnObject(
+        Object owner,
+        String label,
+        List<String> results
+    ) {
+
+        try {
+
+            Object definition =
+                getFieldValue(
+                    owner,
+                    "definition"
+                );
+
+            if (definition == null) {
+                return;
+            }
+
+            Object rendering =
+                getFieldValue(
+                    definition,
+                    "rendering"
+                );
+
+            if (rendering == null) {
+                return;
+            }
+
+            /*
+             * First inspect variables the pack explicitly declares.
+             */
+            try {
+
+                Object customVariables =
+                    getFieldValue(
+                        rendering,
+                        "customVariables"
+                    );
+
+                if (
+                    customVariables instanceof Iterable<?>
+                ) {
+
+                    for (
+                        Object variable :
+                        (Iterable<?>) customVariables
+                    ) {
+
+                        if (
+                            variable != null &&
+                            looksLikeEmergencyVariable(
+                                variable.toString()
+                            )
+                        ) {
+
+                            results.add(
+                                label
+                                    + " custom: "
+                                    + variable
+                            );
+                        }
+                    }
+                }
+
+            } catch (Exception ignored) {
+            }
+
+            /*
+             * More importantly, inspect sound definitions and the
+             * variables that actually make those sounds visible/active.
+             * This tells us what the siren audio is really listening to.
+             */
+            try {
+
+                Object sounds =
+                    getFieldValue(
+                        rendering,
+                        "sounds"
+                    );
+
+                if (
+                    sounds instanceof Iterable<?>
+                ) {
+
+                    for (
+                        Object sound :
+                        (Iterable<?>) sounds
+                    ) {
+
+                        if (sound == null) {
+                            continue;
+                        }
+
+                        String soundName = "";
+
+                        try {
+
+                            Object name =
+                                getFieldValue(
+                                    sound,
+                                    "name"
+                                );
+
+                            if (name != null) {
+                                soundName =
+                                    name.toString();
+                            }
+
+                        } catch (Exception ignored) {
+                        }
+
+                        Object activeAnimations =
+                            null;
+
+                        try {
+
+                            activeAnimations =
+                                getFieldValue(
+                                    sound,
+                                    "activeAnimations"
+                                );
+
+                        } catch (Exception ignored) {
+                        }
+
+                        if (
+                            activeAnimations
+                                instanceof Iterable<?>
+                        ) {
+
+                            for (
+                                Object animation :
+                                (Iterable<?>) activeAnimations
+                            ) {
+
+                                if (
+                                    animation == null
+                                ) {
+                                    continue;
+                                }
+
+                                try {
+
+                                    Object variable =
+                                        getFieldValue(
+                                            animation,
+                                            "variable"
+                                        );
+
+                                    if (variable == null) {
+                                        continue;
+                                    }
+
+                                    String variableName =
+                                        variable.toString();
+
+                                    if (
+                                        looksLikeEmergencyVariable(
+                                            variableName
+                                        ) ||
+                                        looksLikeEmergencyVariable(
+                                            soundName
+                                        )
+                                    ) {
+
+                                        results.add(
+                                            label
+                                                + " sound "
+                                                + soundName
+                                                + " <- "
+                                                + variableName
+                                        );
+                                    }
+
+                                } catch (Exception ignored) {
+                                }
+                            }
+                        }
+                    }
+                }
+
+            } catch (Exception ignored) {
+            }
+
+        } catch (Exception ignored) {
+        }
+    }
+
+    private static boolean looksLikeEmergencyVariable(
+        String value
+    ) {
+
+        if (value == null) {
+            return false;
+        }
+
+        String lower =
+            value.toLowerCase();
+
+        return (
+            lower.contains("siren") ||
+            lower.contains("emerg") ||
+            lower.contains("police") ||
+            lower.contains("wail") ||
+            lower.contains("yelp") ||
+            lower.contains("tone") ||
+            lower.contains("code") ||
+            lower.contains("lightbar") ||
+            lower.contains("auxlt") ||
+            lower.contains("emerlt")
         );
     }
 
