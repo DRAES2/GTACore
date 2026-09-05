@@ -49,8 +49,7 @@ public final class PoliceUnitManager {
         ManagedUnit managed =
             new ManagedUnit(
                 unit,
-                templateName,
-                unitsByVehicle.size()
+                templateName
             );
 
         unitsByVehicle.put(
@@ -188,13 +187,11 @@ public final class PoliceUnitManager {
 
         private final PoliceUnit unit;
         private final String templateName;
-        private final int formationSlot;
         private final DriveState drive;
 
         private ManagedUnit(
             PoliceUnit unit,
-            String templateName,
-            int formationSlot
+            String templateName
         ) {
 
             this.unit =
@@ -204,9 +201,6 @@ public final class PoliceUnitManager {
                 templateName == null
                     ? "unknown"
                     : templateName;
-
-            this.formationSlot =
-                formationSlot;
 
             this.drive =
                 new DriveState();
@@ -220,10 +214,6 @@ public final class PoliceUnitManager {
             return templateName;
         }
 
-        public int getFormationSlot() {
-            return formationSlot;
-        }
-
         public DriveState getDrive() {
             return drive;
         }
@@ -232,11 +222,6 @@ public final class PoliceUnitManager {
     /**
      * Per-cruiser copy of the mutable values used by GTACore's proven
      * follow controller.
-     *
-     * GTACore loads this state immediately before ticking one cruiser
-     * and writes it back immediately afterward.  Therefore a Mustang
-     * can be hard-turning while a Mercedes is driving straight without
-     * either vehicle corrupting the other's controller state.
      */
     public static final class DriveState {
 
@@ -257,6 +242,15 @@ public final class PoliceUnitManager {
         int followHardTurnGrowthTicks;
         double followPreviousAbsoluteError;
 
+        /*
+         * Previous SIGNED error is kept separately.
+         *
+         * This is critical around the +/-180-degree wrap.  We must
+         * compare one real tick to the next rather than comparing the
+         * current sign to a latched turn direction.
+         */
+        double followPreviousHeadingError;
+
         double aiTargetSpeed;
         double aiCurrentSpeed;
         double brakeCommand;
@@ -270,16 +264,6 @@ public final class PoliceUnitManager {
 
         int transmissionTickCounter;
 
-        /*
-         * Object-detection diagnostics/state for this specific cruiser.
-         */
-        boolean objectDetected;
-        String objectType;
-        double objectDistance;
-        boolean policeVehicleAhead;
-        double formationSideOffset;
-        double formationBackOffset;
-
         DriveState() {
             reset();
         }
@@ -292,7 +276,6 @@ public final class PoliceUnitManager {
 
             /*
              * FOLLOW_TURNING in GTACore is 1.
-             * We keep this class implementation-independent otherwise.
              */
             followBaselineMode = 1;
             followTurnDirection = 0.0;
@@ -306,6 +289,7 @@ public final class PoliceUnitManager {
             followHardTurnConfirmTicks = 0;
             followHardTurnGrowthTicks = 0;
             followPreviousAbsoluteError = 0.0;
+            followPreviousHeadingError = 0.0;
 
             aiTargetSpeed = 0.0;
             aiCurrentSpeed = 0.0;
@@ -319,13 +303,6 @@ public final class PoliceUnitManager {
             steeringTapDirection = 0.0;
 
             transmissionTickCounter = 0;
-
-            objectDetected = false;
-            objectType = "none";
-            objectDistance = Double.POSITIVE_INFINITY;
-            policeVehicleAhead = false;
-            formationSideOffset = 0.0;
-            formationBackOffset = 0.0;
         }
     }
 }
