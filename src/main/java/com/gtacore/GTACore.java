@@ -4874,6 +4874,24 @@ public class GTACore {
     ) {
 
         /*
+         * ROAD WAYPOINT MODE
+         *
+         * When A* is feeding us a road waypoint, the ServerPlayer is
+         * NOT the physical point we're driving toward.  Therefore the
+         * player's velocity must not be used for predictive braking.
+         *
+         * The waypoint layer only chooses direction.  The existing
+         * hard-turn controller still owns sharp-corner braking.
+         */
+        if (roadNavigationOverrideActive) {
+
+            throttleCommand = 1.0;
+            brakeCommand = 0.0;
+
+            return;
+        }
+
+        /*
          * Do not let approach braking interfere with a target that is
          * far off to the side/behind.  Hard-turn mode owns those cases.
          */
