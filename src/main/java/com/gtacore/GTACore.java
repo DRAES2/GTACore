@@ -3711,7 +3711,7 @@ public class GTACore {
     }
 
     /*
-     * Creates a temporary A* route from the blocks around this cruiser.
+     * Creates a temporary Hybrid A* route around this cruiser.
      * Recorded road nodes are not required. The route feeds one waypoint
      * at a time into the existing, validated MTS driving controller.
      */
@@ -3809,23 +3809,18 @@ public class GTACore {
 
             if (routeMissing) {
                 /*
-                 * Begin the temporary grid ahead of the physical nose.
-                 * Build this route ONCE and let the cruiser consume it.
-                 * Rebuilding every second moved the first waypoint ahead
-                 * forever and caused the car to drive into the sunset.
+                 * Hybrid A* begins at the car's real position and heading.
+                 * It expands curved left/straight/right driving motions,
+                 * so a target behind produces a feasible loop instead of
+                 * an impossible instantaneous 180-degree waypoint.
                  */
-
-                double pathStartX =
-                    wrapper.getX() + forward[0] * 12.0;
-
-                double pathStartZ =
-                    wrapper.getZ() + forward[1] * 12.0;
-
                 List<BlockPos> newRoute =
-                    TerrainPathfinder.findPath(
+                    HybridVehiclePathfinder.findPath(
                         level,
-                        pathStartX,
-                        pathStartZ,
+                        wrapper.getX(),
+                        wrapper.getZ(),
+                        forward[0],
+                        forward[1],
                         target.getX(),
                         target.getZ()
                     );
