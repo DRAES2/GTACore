@@ -43,6 +43,13 @@ public class GTACore {
         new PoliceUnitManager();
 
     /*
+     * Prevent selected-car-only systems such as the prototype home
+     * breadcrumb recorder from running while GTACore temporarily loads
+     * a managed unit's controller state.
+     */
+    private static boolean processingManagedPoliceUnit = false;
+
+    /*
      * Temporary AI driving inputs.
      *
      * driveForward = our virtual W key.
@@ -2294,9 +2301,40 @@ public class GTACore {
             );
         }
 
+        /*
+         * Managed police cruisers are ticked first.  Each one loads its
+         * own controller snapshot, runs the proven follow controller,
+         * then writes its state back before the next cruiser is ticked.
+         */
+        tickManagedPoliceUnits(
+            event.getServer()
+        );
+
         if (selectedCar == null) {
             return;
         }
+
+        /*
+         * A selected cruiser that is already in the manager was just
+         * updated above.  Do not control it twice this tick.
+         */
+        if (
+            policeUnitManager
+                .isVehicleInActivePursuit(
+                    selectedCar
+                )
+        ) {
+            return;
+        }
+
+        runSelectedVehicleControl(
+            event.getServer()
+        );
+    }
+
+    private static void runSelectedVehicleControl(
+        MinecraftServer server
+    ) {
 
         try {
 
@@ -2304,12 +2342,12 @@ public class GTACore {
 
             Object vehicle =
                 getSelectedVehicle(
-                    event.getServer()
+                    server
                 );
 
             Entity wrapper =
                 getSelectedWrapper(
-                    event.getServer()
+                    server
                 );
 
             if (
@@ -2403,6 +2441,7 @@ public class GTACore {
             }
 
             if (
+                !processingManagedPoliceUnit &&
                 homeSet &&
                 !returningHome
             ) {
@@ -2436,7 +2475,7 @@ public class GTACore {
             if (followTargetId != null) {
 
                 updateFollowNavigation(
-                    event.getServer(),
+                    server,
                     vehicle,
                     wrapper
                 );
@@ -2638,6 +2677,310 @@ public class GTACore {
 
             e.printStackTrace();
         }
+
+    }
+
+    private static void tickManagedPoliceUnits(
+        MinecraftServer server
+    ) {
+
+        List<PoliceUnitManager.ManagedUnit> active =
+            policeUnitManager
+                .getActivePursuitUnits();
+
+        if (active.isEmpty()) {
+            return;
+        }
+
+        /*
+         * Preserve the currently selected/manual controller exactly.
+         * Managed units temporarily reuse GTACore's proven controller
+         * implementation, but none of their state is allowed to leak
+         * back into manual control or another cruiser.
+         */
+        UUID savedSelectedCar =
+            selectedCar;
+
+        int savedWantedLevel =
+            wantedLevel;
+
+        UUID savedWantedTargetId =
+            wantedTargetId;
+
+        UUID savedFollowTargetId =
+            followTargetId;
+
+        boolean savedReturningHome =
+            returningHome;
+
+        int savedHomeRouteIndex =
+            homeRouteIndex;
+
+        PoliceUnitManager.DriveState manualDrive =
+            captureCurrentPoliceDriveState();
+
+        try {
+
+            processingManagedPoliceUnit =
+                true;
+
+            for (
+                PoliceUnitManager.ManagedUnit managed :
+                active
+            ) {
+
+                PoliceUnit unit =
+                    managed.getUnit();
+
+                UUID vehicleId =
+                    unit.getVehicleId();
+
+                UUID targetId =
+                    unit.getTargetId();
+
+                if (
+                    vehicleId == null ||
+                    targetId == null
+                ) {
+                    continue;
+                }
+
+                selectedCar =
+                    vehicleId;
+
+                wantedLevel = 1;
+                wantedTargetId =
+                    targetId;
+
+                followTargetId =
+                    targetId;
+
+                returningHome = false;
+                homeRouteIndex = -1;
+
+                loadPoliceDriveState(
+                    managed.getDrive()
+                );
+
+                runSelectedVehicleControl(
+                    server
+                );
+
+                savePoliceDriveState(
+                    managed.getDrive()
+                );
+
+                /*
+                 * updateFollowNavigation clears followTargetId if the
+                 * target disappeared or changed dimension.  Reflect
+                 * that back into this PoliceUnit only.
+                 */
+                if (followTargetId == null) {
+
+                    unit.setTargetId(
+                        null
+                    );
+
+                    unit.setState(
+                        PoliceState.PATROL
+                    );
+                }
+            }
+
+        } finally {
+
+            processingManagedPoliceUnit =
+                false;
+
+            selectedCar =
+                savedSelectedCar;
+
+            wantedLevel =
+                savedWantedLevel;
+
+            wantedTargetId =
+                savedWantedTargetId;
+
+            followTargetId =
+                savedFollowTargetId;
+
+            returningHome =
+                savedReturningHome;
+
+            homeRouteIndex =
+                savedHomeRouteIndex;
+
+            loadPoliceDriveState(
+                manualDrive
+            );
+        }
+    }
+
+    private static PoliceUnitManager.DriveState
+        captureCurrentPoliceDriveState() {
+
+        PoliceUnitManager.DriveState state =
+            new PoliceUnitManager.DriveState();
+
+        savePoliceDriveState(
+            state
+        );
+
+        return state;
+    }
+
+    private static void savePoliceDriveState(
+        PoliceUnitManager.DriveState state
+    ) {
+
+        state.driveForward =
+            driveForward;
+
+        state.driveReverse =
+            driveReverse;
+
+        state.throttleCommand =
+            throttleCommand;
+
+        state.followBaselineMode =
+            followBaselineMode;
+
+        state.followTurnDirection =
+            followTurnDirection;
+
+        state.followHeadingError =
+            followHeadingError;
+
+        state.followMisalignmentTicks =
+            followMisalignmentTicks;
+
+        state.followSteerPulseTick =
+            followSteerPulseTick;
+
+        state.followDigitalSteeringActive =
+            followDigitalSteeringActive;
+
+        state.followHardTurnActive =
+            followHardTurnActive;
+
+        state.followHardTurnCatchup =
+            followHardTurnCatchup;
+
+        state.followHardTurnConfirmTicks =
+            followHardTurnConfirmTicks;
+
+        state.followHardTurnGrowthTicks =
+            followHardTurnGrowthTicks;
+
+        state.followPreviousAbsoluteError =
+            followPreviousAbsoluteError;
+
+        state.aiTargetSpeed =
+            aiTargetSpeed;
+
+        state.aiCurrentSpeed =
+            aiCurrentSpeed;
+
+        state.brakeCommand =
+            brakeCommand;
+
+        state.parkingBrakeCommand =
+            parkingBrakeCommand;
+
+        state.steeringTarget =
+            steeringTarget;
+
+        state.steeringCurrent =
+            steeringCurrent;
+
+        state.steeringTapTicksRemaining =
+            steeringTapTicksRemaining;
+
+        state.steeringTapRestTicksRemaining =
+            steeringTapRestTicksRemaining;
+
+        state.steeringTapDirection =
+            steeringTapDirection;
+
+        state.transmissionTickCounter =
+            transmissionTickCounter;
+    }
+
+    private static void loadPoliceDriveState(
+        PoliceUnitManager.DriveState state
+    ) {
+
+        driveForward =
+            state.driveForward;
+
+        driveReverse =
+            state.driveReverse;
+
+        throttleCommand =
+            state.throttleCommand;
+
+        followBaselineMode =
+            state.followBaselineMode;
+
+        followTurnDirection =
+            state.followTurnDirection;
+
+        followHeadingError =
+            state.followHeadingError;
+
+        followMisalignmentTicks =
+            state.followMisalignmentTicks;
+
+        followSteerPulseTick =
+            state.followSteerPulseTick;
+
+        followDigitalSteeringActive =
+            state.followDigitalSteeringActive;
+
+        followHardTurnActive =
+            state.followHardTurnActive;
+
+        followHardTurnCatchup =
+            state.followHardTurnCatchup;
+
+        followHardTurnConfirmTicks =
+            state.followHardTurnConfirmTicks;
+
+        followHardTurnGrowthTicks =
+            state.followHardTurnGrowthTicks;
+
+        followPreviousAbsoluteError =
+            state.followPreviousAbsoluteError;
+
+        aiTargetSpeed =
+            state.aiTargetSpeed;
+
+        aiCurrentSpeed =
+            state.aiCurrentSpeed;
+
+        brakeCommand =
+            state.brakeCommand;
+
+        parkingBrakeCommand =
+            state.parkingBrakeCommand;
+
+        steeringTarget =
+            state.steeringTarget;
+
+        steeringCurrent =
+            state.steeringCurrent;
+
+        steeringTapTicksRemaining =
+            state.steeringTapTicksRemaining;
+
+        steeringTapRestTicksRemaining =
+            state.steeringTapRestTicksRemaining;
+
+        steeringTapDirection =
+            state.steeringTapDirection;
+
+        transmissionTickCounter =
+            state.transmissionTickCounter;
     }
 
     // ============================================================
