@@ -49,7 +49,8 @@ public final class PoliceUnitManager {
         ManagedUnit managed =
             new ManagedUnit(
                 unit,
-                templateName
+                templateName,
+                unitsByVehicle.size()
             );
 
         unitsByVehicle.put(
@@ -187,11 +188,13 @@ public final class PoliceUnitManager {
 
         private final PoliceUnit unit;
         private final String templateName;
+        private final int formationSlot;
         private final DriveState drive;
 
         private ManagedUnit(
             PoliceUnit unit,
-            String templateName
+            String templateName,
+            int formationSlot
         ) {
 
             this.unit =
@@ -201,6 +204,9 @@ public final class PoliceUnitManager {
                 templateName == null
                     ? "unknown"
                     : templateName;
+
+            this.formationSlot =
+                formationSlot;
 
             this.drive =
                 new DriveState();
@@ -212,6 +218,10 @@ public final class PoliceUnitManager {
 
         public String getTemplateName() {
             return templateName;
+        }
+
+        public int getFormationSlot() {
+            return formationSlot;
         }
 
         public DriveState getDrive() {
