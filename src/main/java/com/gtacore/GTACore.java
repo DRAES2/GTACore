@@ -3762,32 +3762,58 @@ public class GTACore {
             BlockPos destination =
                 target.blockPosition();
 
+            double[] forward =
+                getVehicleForwardXZ(vehicle);
+
+            double targetDx =
+                target.getX() - wrapper.getX();
+
+            double targetDz =
+                target.getZ() - wrapper.getZ();
+
+            double targetDistance =
+                Math.sqrt(
+                    targetDx * targetDx +
+                    targetDz * targetDz
+                );
+
+            double targetForwardDot =
+                targetDistance < 0.001
+                    ? 1.0
+                    : (
+                        targetDx * forward[0] +
+                        targetDz * forward[1]
+                    ) / targetDistance;
+
+            boolean targetBehind =
+                targetDistance > FOLLOW_STOP_DISTANCE &&
+                targetForwardDot < -0.20;
+
+            /*
+             * Normal direct pursuit is already proven. Only create the
+             * temporary escape route when the player is actually behind
+             * the cruiser, which is the pass-over failure we are solving.
+             */
+            if (
+                !drive.terrainUsingPath &&
+                !targetBehind
+            ) {
+                return;
+            }
+
             drive.terrainRepathTicks++;
 
             boolean routeMissing =
+                !drive.terrainUsingPath ||
                 drive.terrainRoute.isEmpty();
 
-            boolean destinationMoved =
-                drive.terrainDestination == null ||
-                drive.terrainDestination.distSqr(destination) > 64.0;
-
-            boolean timedRepath =
-                drive.terrainRepathTicks >=
-                    ROAD_REPATH_INTERVAL_TICKS;
-
-            if (
-                routeMissing ||
-                destinationMoved ||
-                timedRepath
-            ) {
+            if (routeMissing) {
                 /*
                  * Begin the temporary grid ahead of the physical nose.
-                 * The first waypoint therefore remains forward-biased
-                 * when the player crosses behind the car. A* then bends
-                 * the remaining route back toward the player.
+                 * Build this route ONCE and let the cruiser consume it.
+                 * Rebuilding every second moved the first waypoint ahead
+                 * forever and caused the car to drive into the sunset.
                  */
-                double[] forward =
-                    getVehicleForwardXZ(vehicle);
 
                 double pathStartX =
                     wrapper.getX() + forward[0] * 12.0;
