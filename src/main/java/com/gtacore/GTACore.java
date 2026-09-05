@@ -331,7 +331,18 @@ public class GTACore {
      * wheels instantly from lock to lock.
      */
     private static final double MAX_STEERING_INPUT = 45.0;
-    private static final double STEERING_STEP_PER_TICK = 2.5;
+
+    /*
+     * Match MTS's native keyboard steering defaults:
+     *
+     * RUDDER_DAMPEN_RATE        = 2.0 degrees/tick while held
+     * RUDDER_DAMPEN_RETURN_RATE = 4.0 degrees/tick when released
+     *
+     * This is why a human "tap" only nudges the wheel slightly rather
+     * than instantly snapping it to full +/-45 lock.
+     */
+    private static final double STEERING_STEP_PER_TICK = 2.0;
+    private static final double STEERING_RETURN_STEP_PER_TICK = 4.0;
 
     private static double steeringTarget = 0.0;
     private static double steeringCurrent = 0.0;
@@ -1840,9 +1851,9 @@ public class GTACore {
             }
 
             /*
-             * Follow steering is digital and writes directly to MTS.
-             * Do not let the generic analog smoother overwrite those
-             * left/right taps afterward.
+             * Follow steering already applied exactly one native-style
+             * keyboard steering step this tick.  Do not apply a second
+             * steering step afterward.
              */
             if (!followDigitalSteeringActive) {
 
@@ -4325,11 +4336,14 @@ public class GTACore {
     ) throws Exception {
 
         /*
-         * FOLLOW bypasses the analog smoothing controller entirely.
-         * It sends only tested digital values:
-         * -45, 0, +45.
+         * FOLLOW now emulates MTS keyboard steering rather than
+         * teleporting the wheel.
+         *
+         * A LEFT/RIGHT command means "hold that key this tick".
+         * The actual wheel angle only moves a few degrees per tick,
+         * exactly like a player's keyboard input.
          */
-        double digitalValue =
+        steeringTarget =
             steering > 0.0
                 ? FOLLOW_FULL_STEER
                 : (
@@ -4338,16 +4352,13 @@ public class GTACore {
                         : 0.0
                 );
 
-        steeringTarget =
-            digitalValue;
-
-        steeringCurrent =
-            digitalValue;
-
-        setMTSVariable(
-            vehicle,
-            "rudderInputVar",
-            digitalValue
+        /*
+         * Apply exactly one native-style steering update for this tick.
+         * The main drive loop sees followDigitalSteeringActive and will
+         * not apply a second steering update afterward.
+         */
+        updateSteering(
+            vehicle
         );
     }
 
@@ -4382,17 +4393,51 @@ public class GTACore {
             steeringCurrent;
 
         /*
-         * Return to center faster than we add steering lock.  This
-         * helps the car straighten itself immediately after a turn.
+         * Mirror MTS ControlSystem.controlControlSurface():
+         *
+         * - holding left/right: 2 degrees per tick
+         * - pressing the opposite side while already turned:
+         *   4 degrees per tick so it crosses center faster
+         * - releasing steering: 4 degrees per tick back to center
          */
-        double step =
-            Math.abs(steeringTarget) < 0.5
-                ? 5.0
-                : STEERING_STEP_PER_TICK;
+        double step;
 
         if (
-            Math.abs(difference) <=
-            step
+            Math.abs(
+                steeringTarget
+            ) <
+                0.5
+        ) {
+
+            step =
+                STEERING_RETURN_STEP_PER_TICK;
+
+        } else if (
+            (
+                steeringTarget > 0.0 &&
+                steeringCurrent < 0.0
+            ) ||
+            (
+                steeringTarget < 0.0 &&
+                steeringCurrent > 0.0
+            )
+        ) {
+
+            step =
+                STEERING_STEP_PER_TICK *
+                2.0;
+
+        } else {
+
+            step =
+                STEERING_STEP_PER_TICK;
+        }
+
+        if (
+            Math.abs(
+                difference
+            ) <=
+                step
         ) {
 
             steeringCurrent =
@@ -4407,10 +4452,13 @@ public class GTACore {
                 );
         }
 
-        /*
-         * This is the same MTS variable used by normal
-         * ground-vehicle steering controls.
-         */
+        steeringCurrent =
+            clamp(
+                steeringCurrent,
+                -MAX_STEERING_INPUT,
+                MAX_STEERING_INPUT
+            );
+
         setMTSVariable(
             vehicle,
             "rudderInputVar",
