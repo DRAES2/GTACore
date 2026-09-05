@@ -2990,6 +2990,10 @@ public class GTACore {
             );
         }
 
+        tickRoadRecorder(
+            event.getServer()
+        );
+
         /*
          * Managed police cruisers are ticked first.  Each one loads its
          * own controller snapshot, runs the proven follow controller,
