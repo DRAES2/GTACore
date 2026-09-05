@@ -1192,56 +1192,6 @@ public class GTACore {
                                         vehicle,
                                         false
                                     );
-
-                                    setWantedPursuitPower(
-                                        vehicle,
-                                        false
-                                    );
-
-                                    setWantedPursuitPower(
-                                        vehicle,
-                                        false
-                                    );
-
-                                    setWantedPursuitPower(
-                                        vehicle,
-                                        false
-                                    );
-
-                                    setWantedPursuitPower(
-                                        vehicle,
-                                        false
-                                    );
-
-                                    setWantedPursuitPower(
-                                        vehicle,
-                                        false
-                                    );
-
-                                    setWantedPursuitPower(
-                                        vehicle,
-                                        false
-                                    );
-
-                                    setWantedPursuitPower(
-                                        vehicle,
-                                        false
-                                    );
-
-                                    setWantedPursuitPower(
-                                        vehicle,
-                                        false
-                                    );
-
-                                    setWantedPursuitPower(
-                                        vehicle,
-                                        false
-                                    );
-
-                                    setWantedPursuitPower(
-                                        vehicle,
-                                        false
-                                    );
                                 }
 
                             } catch (Exception e) {
@@ -1496,6 +1446,11 @@ public class GTACore {
                                 if (vehicle != null) {
 
                                     setPoliceEmergencyMode(
+                                        vehicle,
+                                        false
+                                    );
+
+                                    setWantedPursuitPower(
                                         vehicle,
                                         false
                                     );
