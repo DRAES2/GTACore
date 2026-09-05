@@ -1067,7 +1067,7 @@ public class GTACore {
                     + (
                         unitDrive.terrainUsingPath
                             ? (
-                                "terrain "
+                                "hybrid "
                                     + (unitDrive.terrainRouteIndex + 1)
                                     + "/"
                                     + unitDrive.terrainRoute.size()
