@@ -1804,99 +1804,18 @@ public class GTACore {
                 // ------------------------------------------------
                 // /gta wanted
                 //
-                // Wanted level 1 foundation:
-                // - target the player who issued the command
-                // - prepare/start the selected police car
-                // - enable siren/emergency lights
-                // - reuse the proven follow-driving controller
+                // Dispatches ALL registered PoliceUnits to the player.
+                // Each cruiser keeps independent steering/turning/
+                // transmission state.
                 // ------------------------------------------------
                 .then(
                     Commands.literal("wanted")
-                        .executes(context -> {
-
-                            if (selectedCar == null) {
-
-                                context.getSource()
-                                    .sendFailure(
-                                        Component.literal(
-                                            "Select a police car first."
-                                        )
-                                    );
-
-                                return 0;
-                            }
-
-                            ServerPlayer target =
-                                context.getSource()
-                                    .getPlayerOrException();
-
-                            try {
-
-                                prepareSelectedVehicleForAction(
+                        .executes(
+                            context ->
+                                startManagedWantedPursuit(
                                     context.getSource()
-                                        .getServer()
-                                );
-
-                                Object vehicle =
-                                    getSelectedVehicle(
-                                        context.getSource()
-                                            .getServer()
-                                    );
-
-                                if (vehicle == null) {
-
-                                    throw new IllegalStateException(
-                                        "Selected police car is not loaded."
-                                    );
-                                }
-
-                                setPoliceEmergencyMode(
-                                    vehicle,
-                                    true
-                                );
-
-                                setWantedPursuitPower(
-                                    vehicle,
-                                    true
-                                );
-
-                            } catch (Exception e) {
-
-                                e.printStackTrace();
-
-                                context.getSource()
-                                    .sendFailure(
-                                        Component.literal(
-                                            "Could not start wanted pursuit."
-                                        )
-                                    );
-
-                                return 0;
-                            }
-
-                            wantedLevel = 1;
-                            wantedTargetId =
-                                target.getUUID();
-
-                            followTargetId =
-                                wantedTargetId;
-
-                            returningHome = false;
-                            homeRouteIndex = -1;
-                            driveReverse = false;
-
-                            resetFollowBaseline();
-
-                            context.getSource()
-                                .sendSuccess(
-                                    () -> Component.literal(
-                                        "WANTED level 1: police pursuit started."
-                                    ),
-                                    false
-                                );
-
-                            return Command.SINGLE_SUCCESS;
-                        })
+                                )
+                        )
                 )
 
                 // ------------------------------------------------
@@ -1904,56 +1823,27 @@ public class GTACore {
                 // ------------------------------------------------
                 .then(
                     Commands.literal("clearwanted")
-                        .executes(context -> {
+                        .executes(
+                            context ->
+                                clearManagedWantedPursuit(
+                                    context.getSource()
+                                )
+                        )
+                )
 
-                            try {
-
-                                Object vehicle =
-                                    getSelectedVehicle(
-                                        context.getSource()
-                                            .getServer()
-                                    );
-
-                                if (vehicle != null) {
-
-                                    setPoliceEmergencyMode(
-                                        vehicle,
-                                        false
-                                    );
-
-                                    setWantedPursuitPower(
-                                        vehicle,
-                                        false
-                                    );
-                                }
-
-                            } catch (Exception e) {
-
-                                e.printStackTrace();
-                            }
-
-                            wantedLevel = 0;
-                            wantedTargetId = null;
-                            followTargetId = null;
-
-                            resetFollowBaseline();
-
-                            driveForward = false;
-                            driveReverse = false;
-                            throttleCommand = 0.0;
-                            brakeCommand = 1.0;
-                            parkingBrakeCommand = 0.0;
-
-                            context.getSource()
-                                .sendSuccess(
-                                    () -> Component.literal(
-                                        "Wanted level cleared."
-                                    ),
-                                    false
-                                );
-
-                            return Command.SINGLE_SUCCESS;
-                        })
+                // ------------------------------------------------
+                // /gta units
+                //
+                // Diagnostic list of every registered police cruiser.
+                // ------------------------------------------------
+                .then(
+                    Commands.literal("units")
+                        .executes(
+                            context ->
+                                listPoliceUnits(
+                                    context.getSource()
+                                )
+                        )
                 )
 
                 // ------------------------------------------------
