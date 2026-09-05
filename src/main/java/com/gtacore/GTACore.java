@@ -121,6 +121,17 @@ public class GTACore {
     private static UUID followTargetId = null;
 
     /*
+     * WANTED SYSTEM FOUNDATION
+     *
+     * Level 0 = not wanted.
+     * Level 1 = selected police unit pursues the player.
+     * Later this can expand into GTA-style wanted levels, dispatch,
+     * multiple units, search radius, roadblocks, helicopters, etc.
+     */
+    private static int wantedLevel = 0;
+    private static UUID wantedTargetId = null;
+
+    /*
      * FOLLOW_DIGITAL_STEER
      *
      * Important MTS behavior learned from testing:
@@ -175,11 +186,6 @@ public class GTACore {
      */
     private static final int FOLLOW_TAP_ON_TICKS = 1;
     private static final int FOLLOW_TAP_OFF_TICKS = 1;
-
-    // Basic speed control while correcting direction.
-    private static final double FOLLOW_TURN_BRAKE_SPEED = 2.5;
-    private static final double FOLLOW_TURN_BRAKE = 0.55;
-    private static final double FOLLOW_TURN_THROTTLE = 0.38;
 
 
     /*
@@ -1011,6 +1017,151 @@ public class GTACore {
                 )
 
                 // ------------------------------------------------
+                // /gta wanted
+                //
+                // Wanted level 1 foundation:
+                // - target the player who issued the command
+                // - prepare/start the selected police car
+                // - enable siren/emergency lights
+                // - reuse the proven follow-driving controller
+                // ------------------------------------------------
+                .then(
+                    Commands.literal("wanted")
+                        .executes(context -> {
+
+                            if (selectedCar == null) {
+
+                                context.getSource()
+                                    .sendFailure(
+                                        Component.literal(
+                                            "Select a police car first."
+                                        )
+                                    );
+
+                                return 0;
+                            }
+
+                            ServerPlayer target =
+                                context.getSource()
+                                    .getPlayerOrException();
+
+                            try {
+
+                                prepareSelectedVehicleForAction(
+                                    context.getSource()
+                                        .getServer()
+                                );
+
+                                Object vehicle =
+                                    getSelectedVehicle(
+                                        context.getSource()
+                                            .getServer()
+                                    );
+
+                                if (vehicle == null) {
+
+                                    throw new IllegalStateException(
+                                        "Selected police car is not loaded."
+                                    );
+                                }
+
+                                setPoliceEmergencyMode(
+                                    vehicle,
+                                    true
+                                );
+
+                            } catch (Exception e) {
+
+                                e.printStackTrace();
+
+                                context.getSource()
+                                    .sendFailure(
+                                        Component.literal(
+                                            "Could not start wanted pursuit."
+                                        )
+                                    );
+
+                                return 0;
+                            }
+
+                            wantedLevel = 1;
+                            wantedTargetId =
+                                target.getUUID();
+
+                            followTargetId =
+                                wantedTargetId;
+
+                            returningHome = false;
+                            homeRouteIndex = -1;
+                            driveReverse = false;
+
+                            resetFollowBaseline();
+
+                            context.getSource()
+                                .sendSuccess(
+                                    () -> Component.literal(
+                                        "WANTED level 1: police pursuit started."
+                                    ),
+                                    false
+                                );
+
+                            return Command.SINGLE_SUCCESS;
+                        })
+                )
+
+                // ------------------------------------------------
+                // /gta clearwanted
+                // ------------------------------------------------
+                .then(
+                    Commands.literal("clearwanted")
+                        .executes(context -> {
+
+                            try {
+
+                                Object vehicle =
+                                    getSelectedVehicle(
+                                        context.getSource()
+                                            .getServer()
+                                    );
+
+                                if (vehicle != null) {
+
+                                    setPoliceEmergencyMode(
+                                        vehicle,
+                                        false
+                                    );
+                                }
+
+                            } catch (Exception e) {
+
+                                e.printStackTrace();
+                            }
+
+                            wantedLevel = 0;
+                            wantedTargetId = null;
+                            followTargetId = null;
+
+                            resetFollowBaseline();
+
+                            driveForward = false;
+                            driveReverse = false;
+                            throttleCommand = 0.0;
+                            brakeCommand = 1.0;
+                            parkingBrakeCommand = 0.0;
+
+                            context.getSource()
+                                .sendSuccess(
+                                    () -> Component.literal(
+                                        "Wanted level cleared."
+                                    ),
+                                    false
+                                );
+
+                            return Command.SINGLE_SUCCESS;
+                        })
+                )
+
+                // ------------------------------------------------
                 // /gta follow
                 //
                 // Makes the selected car autonomously follow the
@@ -1117,6 +1268,29 @@ public class GTACore {
                     Commands.literal("stop")
                         .executes(context -> {
 
+                            try {
+
+                                Object vehicle =
+                                    getSelectedVehicle(
+                                        context.getSource()
+                                            .getServer()
+                                    );
+
+                                if (vehicle != null) {
+
+                                    setPoliceEmergencyMode(
+                                        vehicle,
+                                        false
+                                    );
+                                }
+
+                            } catch (Exception e) {
+
+                                e.printStackTrace();
+                            }
+
+                            wantedLevel = 0;
+                            wantedTargetId = null;
                             followTargetId = null;
                             resetFollowBaseline();
                             returningHome = false;
@@ -1680,6 +1854,19 @@ public class GTACore {
         ) {
 
             followTargetId = null;
+
+            if (
+                wantedTargetId != null
+            ) {
+                wantedLevel = 0;
+                wantedTargetId = null;
+
+                setPoliceEmergencyMode(
+                    vehicle,
+                    false
+                );
+            }
+
             resetFollowBaseline();
 
             driveForward = false;
@@ -1925,26 +2112,15 @@ public class GTACore {
         followSteerPulseTick++;
 
         /*
-         * Slow enough to make the steering pulse useful instead of
-         * flying past the target heading.
+         * Steering and acceleration are independent controls.
+         *
+         * A steering tap must NEVER release the accelerator.  The AI
+         * can hold virtual W while independently pressing/releasing
+         * LEFT or RIGHT.  This matches how the car is actually driven
+         * by a player.
          */
-        if (
-            aiCurrentSpeed >
-                FOLLOW_TURN_BRAKE_SPEED
-        ) {
-
-            throttleCommand = 0.0;
-            brakeCommand =
-                FOLLOW_TURN_BRAKE;
-
-        } else {
-
-            throttleCommand =
-                FOLLOW_TURN_THROTTLE;
-
-            brakeCommand = 0.0;
-        }
-
+        throttleCommand = 1.0;
+        brakeCommand = 0.0;
         parkingBrakeCommand = 0.0;
 
         driveReverse = false;
@@ -2748,6 +2924,121 @@ public class GTACore {
                 maximum,
                 value
             )
+        );
+    }
+
+    // ============================================================
+    // POLICE EMERGENCY EQUIPMENT
+    // ============================================================
+
+    private static void setPoliceEmergencyMode(
+        Object vehicle,
+        boolean enabled
+    ) throws Exception {
+
+        double value =
+            enabled
+                ? 1.0
+                : 0.0;
+
+        /*
+         * MTS content packs commonly expose emergency equipment as
+         * custom variables.  The official pack uses "siren" for the
+         * looping siren and "EMERLTS" for emergency lights.
+         *
+         * getOrCreateVariable is MTS's native custom-variable path,
+         * so this works without needing a Java field named sirenVar.
+         */
+        setMTSCustomVariable(
+            vehicle,
+            "siren",
+            value
+        );
+
+        setMTSCustomVariable(
+            vehicle,
+            "EMERLTS",
+            value
+        );
+    }
+
+    private static void setMTSCustomVariable(
+        Object owner,
+        String variableName,
+        double value
+    ) throws Exception {
+
+        Method getOrCreateVariable =
+            owner.getClass()
+                .getMethod(
+                    "getOrCreateVariable",
+                    String.class
+                );
+
+        Object variable =
+            getOrCreateVariable.invoke(
+                owner,
+                variableName
+            );
+
+        if (variable == null) {
+
+            throw new IllegalStateException(
+                "Could not create MTS variable: "
+                    + variableName
+            );
+        }
+
+        Method setTo =
+            variable.getClass()
+                .getMethod(
+                    "setTo",
+                    double.class,
+                    boolean.class
+                );
+
+        setTo.invoke(
+            variable,
+            value,
+            true
+        );
+    }
+
+    private static double getMTSCustomVariableValue(
+        Object owner,
+        String variableName
+    ) throws Exception {
+
+        Method getOrCreateVariable =
+            owner.getClass()
+                .getMethod(
+                    "getOrCreateVariable",
+                    String.class
+                );
+
+        Object variable =
+            getOrCreateVariable.invoke(
+                owner,
+                variableName
+            );
+
+        Field currentValue =
+            findField(
+                variable.getClass(),
+                "currentValue"
+            );
+
+        if (currentValue == null) {
+
+            throw new NoSuchFieldException(
+                "currentValue"
+            );
+        }
+
+        currentValue.setAccessible(true);
+
+        return currentValue.getDouble(
+            variable
         );
     }
 
@@ -3959,6 +4250,30 @@ public class GTACore {
                     followTurnDirection,
                     followSteerPulseTick
                 )
+            ),
+            false
+        );
+
+        double sirenValue =
+            getMTSCustomVariableValue(
+                vehicle,
+                "siren"
+            );
+
+        double emergencyLightsValue =
+            getMTSCustomVariableValue(
+                vehicle,
+                "EMERLTS"
+            );
+
+        source.sendSuccess(
+            () -> Component.literal(
+                "Wanted: "
+                    + wantedLevel
+                    + " | siren="
+                    + (sirenValue > 0.5)
+                    + " | emergency lights="
+                    + (emergencyLightsValue > 0.5)
             ),
             false
         );
