@@ -2,6 +2,7 @@ package com.gtacore;
 
 import com.mojang.brigadier.Command;
 import com.mojang.brigadier.arguments.StringArgumentType;
+import com.mojang.brigadier.arguments.IntegerArgumentType;
 
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
@@ -48,6 +49,37 @@ public class GTACore {
      * a managed unit's controller state.
      */
     private static boolean processingManagedPoliceUnit = false;
+
+    // ============================================================
+    // ROAD PATHFINDING LAYER
+    // ============================================================
+
+    /*
+     * The road pathfinder sits ABOVE the proven MTS driving controller.
+     * It only chooses the next X/Z waypoint.  Steering, throttle,
+     * braking, transmission, and hard turns remain in the old controller.
+     */
+    private static boolean roadNavigationOverrideActive = false;
+    private static double roadNavigationTargetX = 0.0;
+    private static double roadNavigationTargetZ = 0.0;
+
+    private static final double ROAD_NODE_SEARCH_RADIUS = 40.0;
+    private static final double ROAD_WAYPOINT_REACHED_DISTANCE = 7.5;
+    private static final int ROAD_REPATH_INTERVAL_TICKS = 20;
+
+    /*
+     * Road recorder.  Drive/walk the center of a road and GTACore
+     * creates a persistent graph node every few blocks, connecting
+     * consecutive nodes automatically.
+     */
+    private static UUID roadRecordingPlayerId = null;
+    private static Integer roadRecordingLastNodeId = null;
+    private static double roadRecordingLastX = 0.0;
+    private static double roadRecordingLastY = 0.0;
+    private static double roadRecordingLastZ = 0.0;
+
+    private static final double ROAD_RECORD_SPACING = 6.0;
+    private static final double ROAD_RECORD_SNAP_DISTANCE = 2.5;
 
     /*
      * Temporary AI driving inputs.
