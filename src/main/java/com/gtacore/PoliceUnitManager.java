@@ -1,5 +1,7 @@
 package com.gtacore;
 
+import net.minecraft.core.BlockPos;
+
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.LinkedHashMap;
@@ -274,6 +276,18 @@ public final class PoliceUnitManager {
         int roadDestinationNodeId;
         boolean roadUsingPath;
 
+        /*
+         * Automatically generated terrain route. These points exist only
+         * while pursuing and require no recorded road network.
+         */
+        final List<BlockPos> terrainRoute =
+            new ArrayList<>();
+
+        int terrainRouteIndex;
+        int terrainRepathTicks;
+        BlockPos terrainDestination;
+        boolean terrainUsingPath;
+
         DriveState() {
             reset();
         }
@@ -320,6 +334,12 @@ public final class PoliceUnitManager {
             roadStartNodeId = -1;
             roadDestinationNodeId = -1;
             roadUsingPath = false;
+
+            terrainRoute.clear();
+            terrainRouteIndex = 0;
+            terrainRepathTicks = 0;
+            terrainDestination = null;
+            terrainUsingPath = false;
         }
     }
 }
