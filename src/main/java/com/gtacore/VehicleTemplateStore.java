@@ -557,8 +557,24 @@ final class VehicleTemplateStore {
                 null
             );
 
+        /*
+         * IMPORTANT: the concrete 1.20.1 Forge implementation class
+         * (mcinterface1201.InterfaceCore) is package-private.
+         *
+         * Calling a public method through that concrete class causes
+         * Java's module access check to fail:
+         *
+         *   GTACore cannot access member of InterfaceCore
+         *
+         * Invoke through MTS's PUBLIC IInterfaceCore interface instead.
+         */
+        Class<?> coreInterfaceClass =
+            Class.forName(
+                "minecrafttransportsimulator.mcinterface.IInterfaceCore"
+            );
+
         Method getNewNBT =
-            core.getClass()
+            coreInterfaceClass
                 .getMethod(
                     "getNewNBTWrapper"
                 );
