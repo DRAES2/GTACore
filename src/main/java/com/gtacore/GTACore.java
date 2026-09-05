@@ -115,54 +115,69 @@ public class GTACore {
     private static final double HOME_TURN_STEERING = 30.0;
 
     // ============================================================
-    // FOLLOW SYSTEM - BASELINE
+    // FOLLOW SYSTEM - DIGITAL STEERING BASELINE
     // ============================================================
 
     private static UUID followTargetId = null;
 
     /*
-     * FOLLOW_BASELINE_ALIGNING
+     * FOLLOW_DIGITAL_STEER
      *
-     * Keep follow deliberately simple until the foundation is stable.
+     * Important MTS behavior learned from testing:
+     * steering is treated like a digital LEFT/RIGHT control.
      *
-     * ALIGNING:
-     * - choose LEFT or RIGHT once
-     * - keep that direction latched
-     * - slow down while turning
-     * - never switch left/right during the same turn
+     * - full left  = -45
+     * - straight   = 0
+     * - full right = +45
      *
-     * STRAIGHT:
-     * - steering is physically forced to 0
-     * - use the same full-throttle path as /gta forward
-     * - ignore small heading errors
-     * - only start another turn after a large error persists
+     * Smaller turns are NOT made by asking for "12 degrees".
+     * They are made by pulsing full steering for short periods and
+     * releasing back to center between pulses.
      */
-    private static final int FOLLOW_BASELINE_ALIGNING = 0;
-    private static final int FOLLOW_BASELINE_STRAIGHT = 1;
+    private static final int FOLLOW_STRAIGHT = 0;
+    private static final int FOLLOW_TURNING = 1;
 
     private static int followBaselineMode =
-        FOLLOW_BASELINE_ALIGNING;
+        FOLLOW_TURNING;
 
     private static double followTurnDirection = 0.0;
-    private static int followMisalignmentTicks = 0;
     private static double followHeadingError = 0.0;
+    private static int followMisalignmentTicks = 0;
+    private static int followSteerPulseTick = 0;
+    private static boolean followDigitalSteeringActive = false;
 
     private static final double FOLLOW_STOP_DISTANCE = 7.0;
 
-    // Good-enough alignment; perfection is not required.
+    // Good enough; once inside this band, release the wheel.
     private static final double FOLLOW_ALIGN_DONE_DEGREES = 8.0;
 
-    // Do not leave straight mode for small target motion.
-    private static final double FOLLOW_REALIGN_START_DEGREES = 30.0;
-    private static final int FOLLOW_REALIGN_CONFIRM_TICKS = 8;
+    // Straight mode ignores normal movement until a real turn is needed.
+    private static final double FOLLOW_REALIGN_START_DEGREES = 24.0;
+    private static final int FOLLOW_REALIGN_CONFIRM_TICKS = 5;
 
-    // Fixed steering during one latched alignment maneuver.
-    private static final double FOLLOW_ALIGN_STEERING = 12.0;
+    // MTS tested steering endpoints.
+    private static final double FOLLOW_FULL_STEER = 45.0;
 
-    // Slow turn behavior.  No reverse, no drift, no parking brake.
-    private static final double FOLLOW_ALIGN_SPEED_LIMIT = 1.6;
-    private static final double FOLLOW_ALIGN_BRAKE = 0.62;
-    private static final double FOLLOW_ALIGN_THROTTLE = 0.28;
+    /*
+     * Pulse schedule by heading error:
+     *
+     *  8-14 deg : 1 tick ON, 4 ticks OFF
+     * 14-25 deg : 1 tick ON, 2 ticks OFF
+     * 25-45 deg : 2 ticks ON, 2 ticks OFF
+     * 45-70 deg : 4 ticks ON, 1 tick OFF
+     * 70+   deg : HOLD continuously
+     *
+     * This gives us turn "size" through time, not fake wheel angles.
+     */
+    private static final double FOLLOW_HOLD_TURN_DEGREES = 70.0;
+    private static final double FOLLOW_WIDE_TURN_DEGREES = 45.0;
+    private static final double FOLLOW_MEDIUM_TURN_DEGREES = 25.0;
+    private static final double FOLLOW_LIGHT_TURN_DEGREES = 14.0;
+
+    // Basic speed control while turning.
+    private static final double FOLLOW_TURN_BRAKE_SPEED = 2.5;
+    private static final double FOLLOW_TURN_BRAKE = 0.55;
+    private static final double FOLLOW_TURN_THROTTLE = 0.38;
 
     /*
      * FORWARD_ONLY_AUTONOMY
@@ -291,11 +306,13 @@ public class GTACore {
     private static void resetFollowBaseline() {
 
         followBaselineMode =
-            FOLLOW_BASELINE_ALIGNING;
+            FOLLOW_TURNING;
 
         followTurnDirection = 0.0;
-        followMisalignmentTicks = 0;
         followHeadingError = 0.0;
+        followMisalignmentTicks = 0;
+        followSteerPulseTick = 0;
+        followDigitalSteeringActive = false;
         parkingBrakeCommand = 0.0;
     }
 
@@ -1311,6 +1328,8 @@ public class GTACore {
 
         try {
 
+            followDigitalSteeringActive = false;
+
             Object vehicle =
                 getSelectedVehicle(
                     event.getServer()
@@ -1446,7 +1465,17 @@ public class GTACore {
                 );
             }
 
-            updateSteering(vehicle);
+            /*
+             * Follow steering is digital and writes directly to MTS.
+             * Do not let the generic analog smoother overwrite those
+             * left/right taps afterward.
+             */
+            if (!followDigitalSteeringActive) {
+
+                updateSteering(
+                    vehicle
+                );
+            }
 
             if (driveForward) {
 
@@ -1624,6 +1653,8 @@ public class GTACore {
         Entity wrapper
     ) throws Exception {
 
+        followDigitalSteeringActive = true;
+
         ServerPlayer target =
             server.getPlayerList()
                 .getPlayer(
@@ -1644,8 +1675,9 @@ public class GTACore {
             throttleCommand = 0.0;
             brakeCommand = 1.0;
 
-            centerSteeringImmediately(
-                vehicle
+            setFollowDigitalSteering(
+                vehicle,
+                0.0
             );
 
             return;
@@ -1670,9 +1702,6 @@ public class GTACore {
                 vehicle
             );
 
-        /*
-         * Close enough: stop.  No steering corrections while parked.
-         */
         if (
             distance <=
                 FOLLOW_STOP_DISTANCE
@@ -1684,8 +1713,15 @@ public class GTACore {
             brakeCommand = 1.0;
             parkingBrakeCommand = 0.0;
 
-            centerSteeringImmediately(
-                vehicle
+            followBaselineMode =
+                FOLLOW_STRAIGHT;
+
+            followTurnDirection = 0.0;
+            followSteerPulseTick = 0;
+
+            setFollowDigitalSteering(
+                vehicle,
+                0.0
             );
 
             return;
@@ -1708,21 +1744,20 @@ public class GTACore {
         // ========================================================
         if (
             followBaselineMode ==
-                FOLLOW_BASELINE_STRAIGHT
+                FOLLOW_STRAIGHT
         ) {
 
             /*
-             * This is absolute: while straight, wheel = 0.
-             * We do not make tiny corrections.
+             * Straight means truly no steering input.
              */
-            centerSteeringImmediately(
-                vehicle
+            setFollowDigitalSteering(
+                vehicle,
+                0.0
             );
 
             /*
-             * A new turn is allowed only if the player stays at
-             * least 30 degrees off our nose for 8 consecutive ticks.
-             * One noisy reading cannot start a turn.
+             * Ignore ordinary target movement.  A new correction is
+             * allowed only after a meaningful error persists.
              */
             if (
                 absoluteError >=
@@ -1742,7 +1777,7 @@ public class GTACore {
             ) {
 
                 followBaselineMode =
-                    FOLLOW_BASELINE_ALIGNING;
+                    FOLLOW_TURNING;
 
                 followTurnDirection =
                     Math.signum(
@@ -1755,11 +1790,12 @@ public class GTACore {
                     followTurnDirection = 1.0;
                 }
 
+                followSteerPulseTick = 0;
                 followMisalignmentTicks = 0;
             }
 
             /*
-             * Same proven acceleration as /gta forward.
+             * Same proven acceleration path as /gta forward.
              */
             throttleCommand = 1.0;
             brakeCommand = 0.0;
@@ -1772,13 +1808,9 @@ public class GTACore {
         }
 
         // ========================================================
-        // ALIGNING
+        // TURNING
         // ========================================================
 
-        /*
-         * If this alignment maneuver has not picked a direction yet,
-         * choose it ONCE from the player's current side.
-         */
         if (
             followTurnDirection == 0.0
         ) {
@@ -1793,21 +1825,21 @@ public class GTACore {
             ) {
                 followTurnDirection = 1.0;
             }
+
+            followSteerPulseTick = 0;
         }
 
+        /*
+         * Keep one direction for the entire maneuver.  If the nose
+         * crosses the target heading, STOP steering instead of
+         * instantly commanding the opposite side.
+         */
         boolean crossedTargetHeading =
             Math.signum(
                 followHeadingError
             ) !=
-            followTurnDirection;
+                followTurnDirection;
 
-        /*
-         * Finish this one turn when alignment is good enough OR when
-         * the nose crosses the target heading.
-         *
-         * Crucially, we do NOT immediately start turning the opposite
-         * way.  We enter STRAIGHT mode first.
-         */
         if (
             absoluteError <=
                 FOLLOW_ALIGN_DONE_DEGREES ||
@@ -1815,13 +1847,15 @@ public class GTACore {
         ) {
 
             followBaselineMode =
-                FOLLOW_BASELINE_STRAIGHT;
+                FOLLOW_STRAIGHT;
 
             followTurnDirection = 0.0;
+            followSteerPulseTick = 0;
             followMisalignmentTicks = 0;
 
-            centerSteeringImmediately(
-                vehicle
+            setFollowDigitalSteering(
+                vehicle,
+                0.0
             );
 
             throttleCommand = 1.0;
@@ -1835,31 +1869,50 @@ public class GTACore {
         }
 
         /*
-         * One maneuver = one fixed turn direction.
-         * No left/right swapping while this turn is active.
+         * Calculate only ON/OFF timing.
+         * Steering itself is always full left, full right, or center.
          */
-        steeringTarget =
-            followTurnDirection *
-            FOLLOW_ALIGN_STEERING;
+        boolean steeringOn =
+            shouldHoldFollowSteering(
+                absoluteError,
+                followSteerPulseTick
+            );
+
+        if (steeringOn) {
+
+            setFollowDigitalSteering(
+                vehicle,
+                followTurnDirection *
+                    FOLLOW_FULL_STEER
+            );
+
+        } else {
+
+            setFollowDigitalSteering(
+                vehicle,
+                0.0
+            );
+        }
+
+        followSteerPulseTick++;
 
         /*
-         * Turning while fast is what creates the huge overshoot.
-         * First shed speed with the normal brake.  Once slow enough,
-         * use a small throttle to keep the car rotating forward.
+         * Slow enough to make the steering pulse useful instead of
+         * flying past the target heading.
          */
         if (
             aiCurrentSpeed >
-                FOLLOW_ALIGN_SPEED_LIMIT
+                FOLLOW_TURN_BRAKE_SPEED
         ) {
 
             throttleCommand = 0.0;
             brakeCommand =
-                FOLLOW_ALIGN_BRAKE;
+                FOLLOW_TURN_BRAKE;
 
         } else {
 
             throttleCommand =
-                FOLLOW_ALIGN_THROTTLE;
+                FOLLOW_TURN_THROTTLE;
 
             brakeCommand = 0.0;
         }
@@ -1868,6 +1921,64 @@ public class GTACore {
 
         driveReverse = false;
         driveForward = true;
+    }
+
+    private static boolean shouldHoldFollowSteering(
+        double absoluteError,
+        int pulseTick
+    ) {
+
+        if (
+            absoluteError >=
+                FOLLOW_HOLD_TURN_DEGREES
+        ) {
+
+            // Full hold for a very wide/sharp turn.
+            return true;
+        }
+
+        int onTicks;
+        int offTicks;
+
+        if (
+            absoluteError >=
+                FOLLOW_WIDE_TURN_DEGREES
+        ) {
+
+            onTicks = 4;
+            offTicks = 1;
+
+        } else if (
+            absoluteError >=
+                FOLLOW_MEDIUM_TURN_DEGREES
+        ) {
+
+            onTicks = 2;
+            offTicks = 2;
+
+        } else if (
+            absoluteError >=
+                FOLLOW_LIGHT_TURN_DEGREES
+        ) {
+
+            onTicks = 1;
+            offTicks = 2;
+
+        } else {
+
+            onTicks = 1;
+            offTicks = 4;
+        }
+
+        int cycle =
+            onTicks +
+            offTicks;
+
+        return (
+            pulseTick %
+                cycle
+        ) <
+            onTicks;
     }
 
     // ============================================================
@@ -2673,6 +2784,38 @@ public class GTACore {
     // ============================================================
     // STEERING
     // ============================================================
+
+    private static void setFollowDigitalSteering(
+        Object vehicle,
+        double steering
+    ) throws Exception {
+
+        /*
+         * FOLLOW bypasses the analog smoothing controller entirely.
+         * It sends only tested digital values:
+         * -45, 0, +45.
+         */
+        double digitalValue =
+            steering > 0.0
+                ? FOLLOW_FULL_STEER
+                : (
+                    steering < 0.0
+                        ? -FOLLOW_FULL_STEER
+                        : 0.0
+                );
+
+        steeringTarget =
+            digitalValue;
+
+        steeringCurrent =
+            digitalValue;
+
+        setMTSVariable(
+            vehicle,
+            "rudderInputVar",
+            digitalValue
+        );
+    }
 
     private static void centerSteeringImmediately(
         Object vehicle
@@ -3761,16 +3904,15 @@ public class GTACore {
         source.sendSuccess(
             () -> Component.literal(
                 String.format(
-                    "Following: %s | mode: %s | error: %.1f deg | confirm: %d/%d | turn: %.0f",
+                    "Following: %s | mode: %s | error: %.1f deg | turn: %.0f | pulse tick: %d",
                     followTargetId != null,
                     followBaselineMode ==
-                        FOLLOW_BASELINE_STRAIGHT
+                        FOLLOW_STRAIGHT
                             ? "STRAIGHT"
-                            : "ALIGNING",
+                            : "TURNING",
                     followHeadingError,
-                    followMisalignmentTicks,
-                    FOLLOW_REALIGN_CONFIRM_TICKS,
-                    followTurnDirection
+                    followTurnDirection,
+                    followSteerPulseTick
                 )
             ),
             false
