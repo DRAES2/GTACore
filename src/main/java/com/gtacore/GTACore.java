@@ -383,6 +383,27 @@ public class GTACore {
 
     private static int serviceFuelTickCounter = 0;
 
+    /*
+     * POLICE VEHICLE TEMPLATE
+     *
+     * We intentionally clone a fully-built MTS vehicle rather than
+     * manually guessing wheel/engine/seat slots.
+     *
+     * Workflow:
+     * 1. Build the police car once by hand.
+     * 2. /gta carselect
+     * 3. /gta savetemplate
+     * 4. /gta spawncruiser
+     *
+     * The saved MTS NBT contains the exact installed wheels, engine,
+     * seats, lightbar, livery, and nested parts.  Spawning from that
+     * NBT recreates a driveable copy.
+     */
+    private static Object policeVehicleTemplateItem = null;
+    private static Object policeVehicleTemplateTag = null;
+    private static int policeVehicleTemplateWheelCount = 0;
+    private static int policeVehicleTemplatePartCount = 0;
+
     public GTACore() {
         MinecraftForge.EVENT_BUS.register(this);
         System.out.println("[GTACore] Loaded!");
@@ -589,6 +610,275 @@ public class GTACore {
                                         ),
                                     false
                                 );
+
+                            return Command.SINGLE_SUCCESS;
+                        })
+                )
+
+                // ------------------------------------------------
+                // /gta savetemplate
+                //
+                // Saves the currently selected, fully-equipped MTS
+                // vehicle as the police cruiser factory template.
+                // ------------------------------------------------
+                .then(
+                    Commands.literal("savetemplate")
+                        .executes(context -> {
+
+                            if (selectedCar == null) {
+
+                                context.getSource()
+                                    .sendFailure(
+                                        Component.literal(
+                                            "Select a fully-built police car first with /gta carselect."
+                                        )
+                                    );
+
+                                return 0;
+                            }
+
+                            try {
+
+                                Object vehicle =
+                                    getSelectedVehicle(
+                                        context.getSource()
+                                            .getServer()
+                                    );
+
+                                if (vehicle == null) {
+
+                                    context.getSource()
+                                        .sendFailure(
+                                            Component.literal(
+                                                "Selected MTS vehicle is not loaded."
+                                            )
+                                        );
+
+                                    return 0;
+                                }
+
+                                int wheels =
+                                    countMTSPartsByClassName(
+                                        vehicle,
+                                        "PartGroundDevice"
+                                    );
+
+                                int engines =
+                                    getEngines(
+                                        vehicle
+                                    ).size();
+
+                                if (wheels < 2) {
+
+                                    context.getSource()
+                                        .sendFailure(
+                                            Component.literal(
+                                                "Template rejected: this car does not have enough installed ground-device/wheel parts."
+                                            )
+                                        );
+
+                                    return 0;
+                                }
+
+                                if (engines < 1) {
+
+                                    context.getSource()
+                                        .sendFailure(
+                                            Component.literal(
+                                                "Template rejected: this car has no installed engine."
+                                            )
+                                        );
+
+                                    return 0;
+                                }
+
+                                savePoliceVehicleTemplate(
+                                    vehicle
+                                );
+
+                                final int savedWheels =
+                                    policeVehicleTemplateWheelCount;
+
+                                final int savedParts =
+                                    policeVehicleTemplatePartCount;
+
+                                context.getSource()
+                                    .sendSuccess(
+                                        () -> Component.literal(
+                                            "Police cruiser template saved: "
+                                                + savedWheels
+                                                + " wheel/ground-device parts, "
+                                                + savedParts
+                                                + " total installed parts."
+                                        ),
+                                        false
+                                    );
+
+                            } catch (Exception e) {
+
+                                e.printStackTrace();
+
+                                context.getSource()
+                                    .sendFailure(
+                                        Component.literal(
+                                            "Could not save the MTS police vehicle template."
+                                        )
+                                    );
+
+                                return 0;
+                            }
+
+                            return Command.SINGLE_SUCCESS;
+                        })
+                )
+
+                // ------------------------------------------------
+                // /gta spawncruiser
+                //
+                // Spawns a complete copy of the saved template about
+                // six blocks in front of the player.
+                // ------------------------------------------------
+                .then(
+                    Commands.literal("spawncruiser")
+                        .executes(context -> {
+
+                            if (
+                                policeVehicleTemplateItem == null ||
+                                policeVehicleTemplateTag == null
+                            ) {
+
+                                context.getSource()
+                                    .sendFailure(
+                                        Component.literal(
+                                            "No police cruiser template saved. Build one, /gta carselect, then /gta savetemplate."
+                                        )
+                                    );
+
+                                return 0;
+                            }
+
+                            ServerPlayer player =
+                                context.getSource()
+                                    .getPlayerOrException();
+
+                            try {
+
+                                Entity spawnedWrapper =
+                                    spawnPoliceCruiserFromTemplate(
+                                        player
+                                    );
+
+                                if (spawnedWrapper == null) {
+
+                                    context.getSource()
+                                        .sendFailure(
+                                            Component.literal(
+                                                "MTS did not return a spawned vehicle wrapper."
+                                            )
+                                        );
+
+                                    return 0;
+                                }
+
+                                selectedCar =
+                                    spawnedWrapper.getUUID();
+
+                                Object spawnedVehicle =
+                                    getInternalMTSEntity(
+                                        spawnedWrapper
+                                    );
+
+                                int spawnedWheels =
+                                    countMTSPartsByClassName(
+                                        spawnedVehicle,
+                                        "PartGroundDevice"
+                                    );
+
+                                if (
+                                    spawnedWheels <
+                                        policeVehicleTemplateWheelCount
+                                ) {
+
+                                    context.getSource()
+                                        .sendFailure(
+                                            Component.literal(
+                                                "Cruiser spawned, but not all wheel parts were restored. Expected "
+                                                    + policeVehicleTemplateWheelCount
+                                                    + ", found "
+                                                    + spawnedWheels
+                                                    + "."
+                                            )
+                                        );
+
+                                    return 0;
+                                }
+
+                                refillServiceFuel(
+                                    spawnedVehicle
+                                );
+
+                                serviceVehicles.add(
+                                    selectedCar
+                                );
+
+                                setPoliceEmergencyMode(
+                                    spawnedVehicle,
+                                    false
+                                );
+
+                                resetFollowBaseline();
+                                driveForward = false;
+                                driveReverse = false;
+                                returningHome = false;
+                                followTargetId = null;
+                                wantedLevel = 0;
+                                wantedTargetId = null;
+                                throttleCommand = 0.0;
+                                brakeCommand = 1.0;
+                                parkingBrakeCommand = 0.0;
+
+                                centerSteeringImmediately(
+                                    spawnedVehicle
+                                );
+
+                                setMTSVariable(
+                                    spawnedVehicle,
+                                    "throttleVar",
+                                    0.0
+                                );
+
+                                setMTSVariable(
+                                    spawnedVehicle,
+                                    "brakeVar",
+                                    1.0
+                                );
+
+                                final int finalWheelCount =
+                                    spawnedWheels;
+
+                                context.getSource()
+                                    .sendSuccess(
+                                        () -> Component.literal(
+                                            "Police cruiser spawned and selected with "
+                                                + finalWheelCount
+                                                + " wheel/ground-device parts."
+                                        ),
+                                        false
+                                    );
+
+                            } catch (Exception e) {
+
+                                e.printStackTrace();
+
+                                context.getSource()
+                                    .sendFailure(
+                                        Component.literal(
+                                            "Could not spawn the police cruiser template."
+                                        )
+                                    );
+
+                                return 0;
+                            }
 
                             return Command.SINGLE_SUCCESS;
                         })
@@ -4552,6 +4842,557 @@ public class GTACore {
     }
 
     // ============================================================
+    // POLICE VEHICLE FACTORY / TEMPLATE
+    // ============================================================
+
+    private static void savePoliceVehicleTemplate(
+        Object vehicle
+    ) throws Exception {
+
+        Object templateNBT =
+            newMTSNBTWrapper();
+
+        Method saveMethod =
+            findMethodByNameAndCount(
+                vehicle.getClass(),
+                "save",
+                1
+            );
+
+        if (saveMethod == null) {
+
+            throw new NoSuchMethodException(
+                "MTS vehicle save(IWrapperNBT)"
+            );
+        }
+
+        saveMethod.setAccessible(true);
+
+        Object savedNBT =
+            saveMethod.invoke(
+                vehicle,
+                templateNBT
+            );
+
+        Field tagField =
+            findField(
+                savedNBT.getClass(),
+                "tag"
+            );
+
+        if (tagField == null) {
+
+            throw new NoSuchFieldException(
+                "WrapperNBT.tag"
+            );
+        }
+
+        tagField.setAccessible(true);
+
+        Object tag =
+            tagField.get(
+                savedNBT
+            );
+
+        Method copyMethod =
+            tag.getClass()
+                .getMethod(
+                    "copy"
+                );
+
+        policeVehicleTemplateTag =
+            copyMethod.invoke(
+                tag
+            );
+
+        policeVehicleTemplateItem =
+            getFieldValue(
+                vehicle,
+                "cachedItem"
+            );
+
+        policeVehicleTemplateWheelCount =
+            countMTSPartsByClassName(
+                vehicle,
+                "PartGroundDevice"
+            );
+
+        policeVehicleTemplatePartCount =
+            countAllMTSParts(
+                vehicle
+            );
+    }
+
+    private static Entity spawnPoliceCruiserFromTemplate(
+        ServerPlayer player
+    ) throws Exception {
+
+        Object spawnNBT =
+            createTemplateNBTWrapperCopy();
+
+        Class<?> wrapperWorldClass =
+            Class.forName(
+                "mcinterface1201.WrapperWorld"
+            );
+
+        Method getWorldWrapper =
+            wrapperWorldClass.getMethod(
+                "getWrapperFor",
+                net.minecraft.world.level.Level.class
+            );
+
+        Object worldWrapper =
+            getWorldWrapper.invoke(
+                null,
+                player.serverLevel()
+            );
+
+        Class<?> wrapperPlayerClass =
+            Class.forName(
+                "mcinterface1201.WrapperPlayer"
+            );
+
+        Method getPlayerWrapper =
+            wrapperPlayerClass.getMethod(
+                "getWrapperFor",
+                net.minecraft.world.entity.player.Player.class
+            );
+
+        Object playerWrapper =
+            getPlayerWrapper.invoke(
+                null,
+                player
+            );
+
+        Class<?> vehicleClass =
+            Class.forName(
+                "minecrafttransportsimulator.entities.instances.EntityVehicleF_Physics"
+            );
+
+        java.lang.reflect.Constructor<?> vehicleConstructor =
+            null;
+
+        for (
+            java.lang.reflect.Constructor<?> constructor :
+            vehicleClass.getDeclaredConstructors()
+        ) {
+
+            Class<?>[] parameters =
+                constructor.getParameterTypes();
+
+            if (parameters.length != 4) {
+                continue;
+            }
+
+            if (
+                parameters[0].isInstance(
+                    worldWrapper
+                ) &&
+                parameters[1].isInstance(
+                    playerWrapper
+                ) &&
+                parameters[2].isInstance(
+                    policeVehicleTemplateItem
+                ) &&
+                parameters[3].isInstance(
+                    spawnNBT
+                )
+            ) {
+
+                vehicleConstructor =
+                    constructor;
+
+                break;
+            }
+        }
+
+        if (vehicleConstructor == null) {
+
+            throw new NoSuchMethodException(
+                "EntityVehicleF_Physics(AWrapperWorld, IWrapperPlayer, ItemVehicle, IWrapperNBT)"
+            );
+        }
+
+        vehicleConstructor.setAccessible(
+            true
+        );
+
+        Object vehicle =
+            vehicleConstructor.newInstance(
+                worldWrapper,
+                playerWrapper,
+                policeVehicleTemplateItem,
+                spawnNBT
+            );
+
+        /*
+         * Place the cruiser six blocks in front of the player.
+         *
+         * This mirrors normal MTS placement orientation: player's yaw
+         * plus 90 degrees.
+         */
+        double yawRadians =
+            Math.toRadians(
+                player.getYRot()
+            );
+
+        double forwardX =
+            -Math.sin(
+                yawRadians
+            );
+
+        double forwardZ =
+            Math.cos(
+                yawRadians
+            );
+
+        double spawnX =
+            player.getX() +
+            forwardX *
+                6.0;
+
+        double spawnY =
+            player.getY();
+
+        double spawnZ =
+            player.getZ() +
+            forwardZ *
+                6.0;
+
+        setMTSPoint(
+            vehicle,
+            "position",
+            spawnX,
+            spawnY,
+            spawnZ
+        );
+
+        setMTSPoint(
+            vehicle,
+            "prevPosition",
+            spawnX,
+            spawnY,
+            spawnZ
+        );
+
+        setMTSPoint(
+            vehicle,
+            "motion",
+            0.0,
+            0.0,
+            0.0
+        );
+
+        setMTSPoint(
+            vehicle,
+            "prevMotion",
+            0.0,
+            0.0,
+            0.0
+        );
+
+        Object orientation =
+            getFieldValue(
+                vehicle,
+                "orientation"
+            );
+
+        Class<?> pointClass =
+            Class.forName(
+                "minecrafttransportsimulator.baseclasses.Point3D"
+            );
+
+        Object angles =
+            pointClass
+                .getConstructor(
+                    double.class,
+                    double.class,
+                    double.class
+                )
+                .newInstance(
+                    0.0,
+                    player.getYRot() +
+                        90.0,
+                    0.0
+                );
+
+        Method setToAngles =
+            orientation
+                .getClass()
+                .getMethod(
+                    "setToAngles",
+                    pointClass
+                );
+
+        setToAngles.invoke(
+            orientation,
+            angles
+        );
+
+        Object prevOrientation =
+            getFieldValue(
+                vehicle,
+                "prevOrientation"
+            );
+
+        Method setOrientation =
+            prevOrientation
+                .getClass()
+                .getMethod(
+                    "set",
+                    orientation.getClass()
+                );
+
+        setOrientation.invoke(
+            prevOrientation,
+            orientation
+        );
+
+        /*
+         * Use MTS's own spawn path.  The protected helper returns the
+         * vanilla BuilderEntityExisting wrapper, which lets GTACore
+         * immediately select/control the new vehicle.
+         */
+        Method spawnInternal =
+            findMethodByNameAndCount(
+                worldWrapper.getClass(),
+                "spawnEntityInternal",
+                1
+            );
+
+        if (spawnInternal == null) {
+
+            throw new NoSuchMethodException(
+                "WrapperWorld.spawnEntityInternal"
+            );
+        }
+
+        spawnInternal.setAccessible(
+            true
+        );
+
+        Object wrapper =
+            spawnInternal.invoke(
+                worldWrapper,
+                vehicle
+            );
+
+        /*
+         * Critical step: restore all nested MTS parts AFTER the vehicle
+         * itself exists.  This is the same ordering used by MTS's own
+         * vehicle-item placement code.
+         *
+         * Because spawnNBT came from a complete saved cruiser, this
+         * restores the exact wheels, engine, seats, lightbar, etc.
+         */
+        Method addParts =
+            findMethodByNameAndCount(
+                vehicle.getClass(),
+                "addPartsPostAddition",
+                2
+            );
+
+        if (addParts == null) {
+
+            throw new NoSuchMethodException(
+                "addPartsPostAddition"
+            );
+        }
+
+        addParts.setAccessible(
+            true
+        );
+
+        addParts.invoke(
+            vehicle,
+            playerWrapper,
+            spawnNBT
+        );
+
+        if (!(wrapper instanceof Entity)) {
+
+            throw new IllegalStateException(
+                "MTS spawned wrapper is not a vanilla Entity."
+            );
+        }
+
+        return (Entity) wrapper;
+    }
+
+    private static Object newMTSNBTWrapper()
+        throws Exception {
+
+        Class<?> interfaceManager =
+            Class.forName(
+                "minecrafttransportsimulator.mcinterface.InterfaceManager"
+            );
+
+        Field coreInterfaceField =
+            interfaceManager.getField(
+                "coreInterface"
+            );
+
+        Object coreInterface =
+            coreInterfaceField.get(
+                null
+            );
+
+        Method getNewNBT =
+            coreInterface
+                .getClass()
+                .getMethod(
+                    "getNewNBTWrapper"
+                );
+
+        return getNewNBT.invoke(
+            coreInterface
+        );
+    }
+
+    private static Object createTemplateNBTWrapperCopy()
+        throws Exception {
+
+        if (policeVehicleTemplateTag == null) {
+
+            throw new IllegalStateException(
+                "No police vehicle template tag saved."
+            );
+        }
+
+        Method copyMethod =
+            policeVehicleTemplateTag
+                .getClass()
+                .getMethod(
+                    "copy"
+                );
+
+        Object copiedTag =
+            copyMethod.invoke(
+                policeVehicleTemplateTag
+            );
+
+        Class<?> wrapperNBTClass =
+            Class.forName(
+                "mcinterface1201.WrapperNBT"
+            );
+
+        java.lang.reflect.Constructor<?> constructor =
+            wrapperNBTClass
+                .getDeclaredConstructor(
+                    copiedTag.getClass()
+                );
+
+        constructor.setAccessible(
+            true
+        );
+
+        return constructor.newInstance(
+            copiedTag
+        );
+    }
+
+    private static void setMTSPoint(
+        Object owner,
+        String fieldName,
+        double x,
+        double y,
+        double z
+    ) throws Exception {
+
+        Object point =
+            getFieldValue(
+                owner,
+                fieldName
+            );
+
+        Method set =
+            point.getClass()
+                .getMethod(
+                    "set",
+                    double.class,
+                    double.class,
+                    double.class
+                );
+
+        set.invoke(
+            point,
+            x,
+            y,
+            z
+        );
+    }
+
+    private static int countMTSPartsByClassName(
+        Object vehicle,
+        String simpleClassName
+    ) throws Exception {
+
+        Object allParts =
+            getFieldValue(
+                vehicle,
+                "allParts"
+            );
+
+        if (!(allParts instanceof Iterable<?>)) {
+            return 0;
+        }
+
+        int count = 0;
+
+        for (
+            Object part :
+            (Iterable<?>) allParts
+        ) {
+
+            if (
+                part != null &&
+                part.getClass()
+                    .getSimpleName()
+                    .equals(
+                        simpleClassName
+                    )
+            ) {
+
+                count++;
+            }
+        }
+
+        return count;
+    }
+
+    private static int countAllMTSParts(
+        Object vehicle
+    ) throws Exception {
+
+        Object allParts =
+            getFieldValue(
+                vehicle,
+                "allParts"
+            );
+
+        if (allParts instanceof List<?>) {
+
+            return (
+                (List<?>) allParts
+            ).size();
+        }
+
+        int count = 0;
+
+        if (allParts instanceof Iterable<?>) {
+
+            for (
+                Object ignored :
+                (Iterable<?>) allParts
+            ) {
+                count++;
+            }
+        }
+
+        return count;
+    }
+
+    // ============================================================
     // SERVICE VEHICLES
     // ============================================================
 
@@ -6038,6 +6879,42 @@ public class GTACore {
                 );
 
         method.invoke(owner);
+    }
+
+    private static Method findMethodByNameAndCount(
+        Class<?> clazz,
+        String methodName,
+        int parameterCount
+    ) {
+
+        Class<?> current =
+            clazz;
+
+        while (current != null) {
+
+            for (
+                Method method :
+                current.getDeclaredMethods()
+            ) {
+
+                if (
+                    method.getName()
+                        .equals(
+                            methodName
+                        ) &&
+                    method.getParameterCount() ==
+                        parameterCount
+                ) {
+
+                    return method;
+                }
+            }
+
+            current =
+                current.getSuperclass();
+        }
+
+        return null;
     }
 
     private static Field findField(
