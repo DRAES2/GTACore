@@ -1656,6 +1656,111 @@ public class GTACore {
                 )
 
                 // ------------------------------------------------
+                // /gta road ...
+                //
+                // Build/persist the road graph used by police A*.
+                // ------------------------------------------------
+                .then(
+                    Commands.literal("road")
+
+                        .then(
+                            Commands.literal("record")
+                                .then(
+                                    Commands.literal("start")
+                                        .executes(
+                                            context ->
+                                                startRoadRecording(
+                                                    context.getSource()
+                                                )
+                                        )
+                                )
+                                .then(
+                                    Commands.literal("stop")
+                                        .executes(
+                                            context ->
+                                                stopRoadRecording(
+                                                    context.getSource()
+                                                )
+                                        )
+                                )
+                        )
+
+                        .then(
+                            Commands.literal("add")
+                                .executes(
+                                    context ->
+                                        addRoadNode(
+                                            context.getSource()
+                                        )
+                                )
+                        )
+
+                        .then(
+                            Commands.literal("connect")
+                                .then(
+                                    Commands.argument(
+                                        "a",
+                                        IntegerArgumentType.integer(
+                                            1
+                                        )
+                                    )
+                                        .then(
+                                            Commands.argument(
+                                                "b",
+                                                IntegerArgumentType.integer(
+                                                    1
+                                                )
+                                            )
+                                                .executes(
+                                                    context ->
+                                                        connectRoadNodes(
+                                                            context.getSource(),
+                                                            IntegerArgumentType.getInteger(
+                                                                context,
+                                                                "a"
+                                                            ),
+                                                            IntegerArgumentType.getInteger(
+                                                                context,
+                                                                "b"
+                                                            )
+                                                        )
+                                                )
+                                        )
+                                )
+                        )
+
+                        .then(
+                            Commands.literal("nearest")
+                                .executes(
+                                    context ->
+                                        showNearestRoadNode(
+                                            context.getSource()
+                                        )
+                                )
+                        )
+
+                        .then(
+                            Commands.literal("stats")
+                                .executes(
+                                    context ->
+                                        showRoadStats(
+                                            context.getSource()
+                                        )
+                                )
+                        )
+
+                        .then(
+                            Commands.literal("clear")
+                                .executes(
+                                    context ->
+                                        clearRoadNetwork(
+                                            context.getSource()
+                                        )
+                                )
+                        )
+                )
+
+                // ------------------------------------------------
                 // /gta carselect
                 // ------------------------------------------------
                 .then(
