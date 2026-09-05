@@ -36,6 +36,13 @@ public class GTACore {
     private static UUID selectedCar = null;
 
     /*
+     * Every spawned/registered cruiser gets its own PoliceUnit and
+     * its own independent copy of the pursuit controller state.
+     */
+    private static final PoliceUnitManager policeUnitManager =
+        new PoliceUnitManager();
+
+    /*
      * Temporary AI driving inputs.
      *
      * driveForward = our virtual W key.
