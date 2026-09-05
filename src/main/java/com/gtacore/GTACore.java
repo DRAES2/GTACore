@@ -3869,7 +3869,36 @@ public class GTACore {
                     drive.terrainRouteIndex >=
                         drive.terrainRoute.size() - 1;
 
-                if (distance <= 5.5) {
+                double[] currentForward =
+                    getVehicleForwardXZ(vehicle);
+
+                double waypointForwardDot =
+                    distance < 0.001
+                        ? 1.0
+                        : (
+                            dx * currentForward[0] +
+                            dz * currentForward[1]
+                        ) / distance;
+
+                /*
+                 * Intermediate waypoints are pass-through markers, not
+                 * stopping targets. At speed a cruiser may cut inside a
+                 * curve and miss the exact radius. Once a nearby waypoint
+                 * has moved behind the nose, count it as passed instead of
+                 * steering back toward it forever.
+                 */
+                boolean waypointReached =
+                    distance <= 7.5;
+
+                boolean waypointPassed =
+                    !finalWaypoint &&
+                    distance <= 14.0 &&
+                    waypointForwardDot < -0.20;
+
+                if (
+                    waypointReached ||
+                    waypointPassed
+                ) {
                     if (!finalWaypoint) {
                         drive.terrainRouteIndex++;
                         continue;
@@ -4610,6 +4639,7 @@ public class GTACore {
             );
 
         if (
+            !roadNavigationOverrideActive &&
             distance <=
                 FOLLOW_STOP_DISTANCE
         ) {
