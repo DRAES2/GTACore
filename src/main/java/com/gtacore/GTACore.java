@@ -187,6 +187,31 @@ public class GTACore {
     private static final int FOLLOW_TAP_ON_TICKS = 1;
     private static final int FOLLOW_TAP_OFF_TICKS = 1;
 
+    /*
+     * HARD TURN MODE
+     *
+     * Normal pursuit is already working, so this mode is deliberately
+     * isolated and hard to trigger.
+     *
+     * It only activates when:
+     * - the target is far outside the normal forward arc,
+     * - that condition persists for several ticks,
+     * - and the car is actually moving fast.
+     *
+     * Once active, steering is HELD instead of tapped and the car
+     * brakes hard before powering through the rotation.
+     */
+    private static final double FOLLOW_HARD_TURN_START_DEGREES = 85.0;
+    private static final double FOLLOW_HARD_TURN_RETURN_DEGREES = 35.0;
+    private static final double FOLLOW_HARD_TURN_MIN_SPEED = 3.0;
+    private static final double FOLLOW_HARD_TURN_RELEASE_BRAKE_SPEED = 1.7;
+    private static final int FOLLOW_HARD_TURN_CONFIRM_TICKS = 4;
+    private static final double FOLLOW_HARD_TURN_BRAKE = 1.0;
+    private static final double FOLLOW_HARD_TURN_THROTTLE = 0.42;
+
+    private static boolean followHardTurnActive = false;
+    private static int followHardTurnConfirmTicks = 0;
+
 
     /*
      * FORWARD_ONLY_AUTONOMY
@@ -322,6 +347,8 @@ public class GTACore {
         followMisalignmentTicks = 0;
         followSteerPulseTick = 0;
         followDigitalSteeringActive = false;
+        followHardTurnActive = false;
+        followHardTurnConfirmTicks = 0;
         parkingBrakeCommand = 0.0;
     }
 
@@ -1938,6 +1965,165 @@ public class GTACore {
                 followHeadingError
             );
 
+        /*
+         * Detect a turn that normal tap-steering cannot physically
+         * make at the current speed.
+         *
+         * 85 degrees is intentionally much higher than the normal
+         * realignment threshold.  This keeps the working normal
+         * driving behavior completely separate from hard turns.
+         */
+        if (!followHardTurnActive) {
+
+            if (
+                absoluteError >=
+                    FOLLOW_HARD_TURN_START_DEGREES &&
+                aiCurrentSpeed >=
+                    FOLLOW_HARD_TURN_MIN_SPEED
+            ) {
+
+                followHardTurnConfirmTicks++;
+
+            } else {
+
+                followHardTurnConfirmTicks = 0;
+            }
+
+            if (
+                followHardTurnConfirmTicks >=
+                    FOLLOW_HARD_TURN_CONFIRM_TICKS
+            ) {
+
+                followHardTurnActive = true;
+                followHardTurnConfirmTicks = 0;
+
+                followBaselineMode =
+                    FOLLOW_TURNING;
+
+                followTurnDirection =
+                    Math.signum(
+                        followHeadingError
+                    );
+
+                if (
+                    followTurnDirection == 0.0
+                ) {
+                    followTurnDirection = 1.0;
+                }
+
+                followSteerPulseTick = 0;
+                followMisalignmentTicks = 0;
+            }
+        }
+
+        if (followHardTurnActive) {
+
+            /*
+             * HARD TURN steering is a held key, not a tap.
+             *
+             * Keep measuring the real heading every tick; there is
+             * no guessed turn duration.
+             */
+            setFollowDigitalSteering(
+                vehicle,
+                followTurnDirection *
+                    FOLLOW_FULL_STEER
+            );
+
+            boolean crossedTargetHeading =
+                Math.signum(
+                    followHeadingError
+                ) !=
+                    followTurnDirection;
+
+            if (crossedTargetHeading) {
+
+                /*
+                 * We have rotated through the target direction.
+                 * Immediately release steering rather than starting
+                 * an opposite correction.
+                 */
+                followHardTurnActive = false;
+                followBaselineMode =
+                    FOLLOW_STRAIGHT;
+
+                followTurnDirection = 0.0;
+                followSteerPulseTick = 0;
+                followMisalignmentTicks = 0;
+
+                setFollowDigitalSteering(
+                    vehicle,
+                    0.0
+                );
+
+                throttleCommand = 1.0;
+                brakeCommand = 0.0;
+                parkingBrakeCommand = 0.0;
+
+                driveReverse = false;
+                driveForward = true;
+
+                return;
+            }
+
+            if (
+                absoluteError <=
+                    FOLLOW_HARD_TURN_RETURN_DEGREES
+            ) {
+
+                /*
+                 * Hard part of the corner is complete.
+                 * Hand control back to the proven tap-steering logic
+                 * for the final alignment rather than holding lock too
+                 * long and overshooting.
+                 */
+                followHardTurnActive = false;
+                followBaselineMode =
+                    FOLLOW_TURNING;
+
+                followSteerPulseTick = 0;
+
+                throttleCommand = 1.0;
+                brakeCommand = 0.0;
+                parkingBrakeCommand = 0.0;
+
+                driveReverse = false;
+                driveForward = true;
+
+                return;
+            }
+
+            /*
+             * At speed: full service brake + held steering.
+             * Once the car slows enough to rotate tightly:
+             * release brake and feed in moderate throttle while still
+             * holding the same steering direction.
+             */
+            if (
+                aiCurrentSpeed >
+                    FOLLOW_HARD_TURN_RELEASE_BRAKE_SPEED
+            ) {
+
+                throttleCommand = 0.0;
+                brakeCommand =
+                    FOLLOW_HARD_TURN_BRAKE;
+
+            } else {
+
+                throttleCommand =
+                    FOLLOW_HARD_TURN_THROTTLE;
+
+                brakeCommand = 0.0;
+            }
+
+            parkingBrakeCommand = 0.0;
+
+            driveReverse = false;
+            driveForward = true;
+
+            return;
+        }
+
         // ========================================================
         // STRAIGHT
         // ========================================================
@@ -2942,24 +3128,82 @@ public class GTACore {
                 : 0.0;
 
         /*
-         * MTS content packs commonly expose emergency equipment as
-         * custom variables.  The official pack uses "siren" for the
-         * looping siren and "EMERLTS" for emergency lights.
+         * Emergency equipment may be defined on the vehicle itself OR
+         * on an installed part such as a lightbar/siren assembly.
          *
-         * getOrCreateVariable is MTS's native custom-variable path,
-         * so this works without needing a Java field named sirenVar.
+         * Set the official/common variables everywhere in the MTS
+         * multipart tree so the police pack can react wherever it
+         * defines the sound/lights.
          */
-        setMTSCustomVariable(
+        setEmergencyVariableEverywhere(
             vehicle,
             "siren",
             value
         );
 
-        setMTSCustomVariable(
+        setEmergencyVariableEverywhere(
             vehicle,
             "EMERLTS",
             value
         );
+
+        setEmergencyVariableEverywhere(
+            vehicle,
+            "AUXLTS",
+            value
+        );
+    }
+
+    private static void setEmergencyVariableEverywhere(
+        Object vehicle,
+        String variableName,
+        double value
+    ) throws Exception {
+
+        setMTSCustomVariable(
+            vehicle,
+            variableName,
+            value
+        );
+
+        Object allParts =
+            getFieldValue(
+                vehicle,
+                "allParts"
+            );
+
+        if (
+            allParts instanceof Iterable<?>
+        ) {
+
+            for (
+                Object part :
+                (Iterable<?>) allParts
+            ) {
+
+                if (part == null) {
+                    continue;
+                }
+
+                try {
+
+                    setMTSCustomVariable(
+                        part,
+                        variableName,
+                        value
+                    );
+
+                } catch (Exception ignored) {
+
+                    /*
+                     * Some unusual MTS parts may not expose the normal
+                     * definable-variable API.  Do not let one such part
+                     * prevent the rest of the police equipment from
+                     * being enabled.
+                     */
+                }
+            }
+        }
     }
 
     private static void setMTSCustomVariable(
@@ -3040,6 +3284,55 @@ public class GTACore {
         return currentValue.getDouble(
             variable
         );
+    }
+
+    private static double getMTSCustomVariableValueAnywhere(
+        Object vehicle,
+        String variableName
+    ) throws Exception {
+
+        double maximum =
+            getMTSCustomVariableValue(
+                vehicle,
+                variableName
+            );
+
+        Object allParts =
+            getFieldValue(
+                vehicle,
+                "allParts"
+            );
+
+        if (
+            allParts instanceof Iterable<?>
+        ) {
+
+            for (
+                Object part :
+                (Iterable<?>) allParts
+            ) {
+
+                if (part == null) {
+                    continue;
+                }
+
+                try {
+
+                    maximum =
+                        Math.max(
+                            maximum,
+                            getMTSCustomVariableValue(
+                                part,
+                                variableName
+                            )
+                        );
+
+                } catch (Exception ignored) {
+                }
+            }
+        }
+
+        return maximum;
     }
 
     // ============================================================
@@ -4240,12 +4533,13 @@ public class GTACore {
         source.sendSuccess(
             () -> Component.literal(
                 String.format(
-                    "Following: %s | mode: %s | heading error: %.1f deg | turn side: %.0f | feedback tap: %d",
+                    "Following: %s | mode: %s | hard turn: %s | heading error: %.1f deg | turn side: %.0f | feedback tap: %d",
                     followTargetId != null,
                     followBaselineMode ==
                         FOLLOW_STRAIGHT
                             ? "STRAIGHT"
                             : "TURNING",
+                    followHardTurnActive,
                     followHeadingError,
                     followTurnDirection,
                     followSteerPulseTick
@@ -4255,13 +4549,13 @@ public class GTACore {
         );
 
         double sirenValue =
-            getMTSCustomVariableValue(
+            getMTSCustomVariableValueAnywhere(
                 vehicle,
                 "siren"
             );
 
         double emergencyLightsValue =
-            getMTSCustomVariableValue(
+            getMTSCustomVariableValueAnywhere(
                 vehicle,
                 "EMERLTS"
             );
