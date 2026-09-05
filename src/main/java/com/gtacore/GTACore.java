@@ -1657,6 +1657,22 @@ public class GTACore {
             }
 
             /*
+             * Keep the pack-confirmed siren switch asserted throughout
+             * an active pursuit.
+             */
+            if (
+                wantedLevel > 0 &&
+                wantedTargetId != null
+            ) {
+
+                setEmergencyVariableEverywhere(
+                    vehicle,
+                    "Siren",
+                    1.0
+                );
+            }
+
+            /*
              * Headlights/running lights follow Minecraft time
              * automatically for the selected GTACore vehicle.
              */
@@ -3505,6 +3521,26 @@ public class GTACore {
                 : 0.0;
 
         /*
+         * PACK CONFIRMED: "Siren"
+         *
+         * /gta emergencyscan on the installed police cruiser showed:
+         *
+         * mtsofficialpack:siren_police1        <- is_police
+         * mtsofficialpack:siren_police1        <- Siren
+         * mtsofficialpack:siren_police1_inside <- is_police
+         * mtsofficialpack:siren_police1_inside <- Siren
+         *
+         * MTS variable names are case-sensitive.  The earlier
+         * lowercase "siren" was therefore only a newly-created dummy
+         * variable and did not drive the actual sound.
+         */
+        setEmergencyVariableEverywhere(
+            vehicle,
+            "Siren",
+            value
+        );
+
+        /*
          * First enable variables that the CURRENT vehicle/parts
          * actually declare or use for emergency sounds.
          *
@@ -5217,7 +5253,13 @@ public class GTACore {
         double sirenValue =
             getMTSCustomVariableValueAnywhere(
                 vehicle,
-                "siren"
+                "Siren"
+            );
+
+        double isPoliceValue =
+            getMTSCustomVariableValueAnywhere(
+                vehicle,
+                "is_police"
             );
 
         double emergencyLightsValue =
@@ -5230,11 +5272,12 @@ public class GTACore {
             () -> Component.literal(
                 "Wanted: "
                     + wantedLevel
-                    + " | common siren var="
+                    + " | Siren="
                     + (sirenValue > 0.5)
-                    + " | common emergency var="
+                    + " | is_police="
+                    + (isPoliceValue > 0.5)
+                    + " | emergency var="
                     + (emergencyLightsValue > 0.5)
-                    + " (use /gta emergencyscan for pack-specific vars)"
             ),
             false
         );
