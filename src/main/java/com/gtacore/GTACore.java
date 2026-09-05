@@ -3505,30 +3505,319 @@ public class GTACore {
                 : 0.0;
 
         /*
-         * Emergency equipment may be defined on the vehicle itself OR
-         * on an installed part such as a lightbar/siren assembly.
+         * First enable variables that the CURRENT vehicle/parts
+         * actually declare or use for emergency sounds.
          *
-         * Set the official/common variables everywhere in the MTS
-         * multipart tree so the police pack can react wherever it
-         * defines the sound/lights.
+         * This fixes the false-positive case where getOrCreateVariable
+         * made a variable named "siren" report true even though the
+         * installed police pack never listened to that variable.
          */
-        setEmergencyVariableEverywhere(
-            vehicle,
-            "siren",
-            value
-        );
+        int matched =
+            setEmergencyVariablesFromDefinitions(
+                vehicle,
+                value
+            );
 
-        setEmergencyVariableEverywhere(
-            vehicle,
-            "EMERLTS",
-            value
-        );
+        /*
+         * Keep common MTS emergency names as a fallback for packs that
+         * use conventional names but do not expose enough rendering
+         * metadata for us to discover them reflectively.
+         */
+        if (matched == 0) {
 
-        setEmergencyVariableEverywhere(
-            vehicle,
-            "AUXLTS",
-            value
-        );
+            setEmergencyVariableEverywhere(
+                vehicle,
+                "siren",
+                value
+            );
+
+            setEmergencyVariableEverywhere(
+                vehicle,
+                "EMERLTS",
+                value
+            );
+
+            setEmergencyVariableEverywhere(
+                vehicle,
+                "AUXLTS",
+                value
+            );
+        }
+    }
+
+    private static int setEmergencyVariablesFromDefinitions(
+        Object vehicle,
+        double value
+    ) {
+
+        int matched = 0;
+
+        matched +=
+            setEmergencyVariablesOnObject(
+                vehicle,
+                value
+            );
+
+        try {
+
+            Object allParts =
+                getFieldValue(
+                    vehicle,
+                    "allParts"
+                );
+
+            if (
+                allParts instanceof Iterable<?>
+            ) {
+
+                for (
+                    Object part :
+                    (Iterable<?>) allParts
+                ) {
+
+                    if (part == null) {
+                        continue;
+                    }
+
+                    matched +=
+                        setEmergencyVariablesOnObject(
+                            part,
+                            value
+                        );
+                }
+            }
+
+        } catch (Exception ignored) {
+        }
+
+        return matched;
+    }
+
+    private static int setEmergencyVariablesOnObject(
+        Object owner,
+        double value
+    ) {
+
+        int matched = 0;
+
+        try {
+
+            Object definition =
+                getFieldValue(
+                    owner,
+                    "definition"
+                );
+
+            if (definition == null) {
+                return 0;
+            }
+
+            Object rendering =
+                getFieldValue(
+                    definition,
+                    "rendering"
+                );
+
+            if (rendering == null) {
+                return 0;
+            }
+
+            Set<String> declaredCustomVariables =
+                new HashSet<>();
+
+            try {
+
+                Object customVariables =
+                    getFieldValue(
+                        rendering,
+                        "customVariables"
+                    );
+
+                if (
+                    customVariables instanceof Iterable<?>
+                ) {
+
+                    for (
+                        Object variable :
+                        (Iterable<?>) customVariables
+                    ) {
+
+                        if (variable == null) {
+                            continue;
+                        }
+
+                        String variableName =
+                            variable.toString();
+
+                        declaredCustomVariables.add(
+                            variableName
+                        );
+
+                        if (
+                            looksLikeEmergencyVariable(
+                                variableName
+                            )
+                        ) {
+
+                            try {
+
+                                setMTSCustomVariable(
+                                    owner,
+                                    variableName,
+                                    value
+                                );
+
+                                matched++;
+
+                            } catch (Exception ignored) {
+                            }
+                        }
+                    }
+                }
+
+            } catch (Exception ignored) {
+            }
+
+            /*
+             * Now inspect actual sound definitions.
+             *
+             * If a sound's resource name looks like a siren/police
+             * emergency sound, enable the custom animation variables
+             * that gate that sound.  This lets different packs use
+             * names such as "code3", "wail", "siren_on", "custom1",
+             * etc. without GTACore having to guess the exact name.
+             */
+            try {
+
+                Object sounds =
+                    getFieldValue(
+                        rendering,
+                        "sounds"
+                    );
+
+                if (
+                    sounds instanceof Iterable<?>
+                ) {
+
+                    for (
+                        Object sound :
+                        (Iterable<?>) sounds
+                    ) {
+
+                        if (sound == null) {
+                            continue;
+                        }
+
+                        String soundName = "";
+
+                        try {
+
+                            Object name =
+                                getFieldValue(
+                                    sound,
+                                    "name"
+                                );
+
+                            if (name != null) {
+                                soundName =
+                                    name.toString();
+                            }
+
+                        } catch (Exception ignored) {
+                        }
+
+                        if (
+                            !looksLikeEmergencyVariable(
+                                soundName
+                            )
+                        ) {
+                            continue;
+                        }
+
+                        Object activeAnimations =
+                            null;
+
+                        try {
+
+                            activeAnimations =
+                                getFieldValue(
+                                    sound,
+                                    "activeAnimations"
+                                );
+
+                        } catch (Exception ignored) {
+                        }
+
+                        if (
+                            activeAnimations
+                                instanceof Iterable<?>
+                        ) {
+
+                            for (
+                                Object animation :
+                                (Iterable<?>) activeAnimations
+                            ) {
+
+                                if (animation == null) {
+                                    continue;
+                                }
+
+                                try {
+
+                                    Object variable =
+                                        getFieldValue(
+                                            animation,
+                                            "variable"
+                                        );
+
+                                    if (variable == null) {
+                                        continue;
+                                    }
+
+                                    String variableName =
+                                        variable.toString();
+
+                                    /*
+                                     * Only force a variable if it is
+                                     * explicitly custom for this pack,
+                                     * or its name itself clearly looks
+                                     * like emergency equipment.  This
+                                     * avoids overriding engine/RPM/etc.
+                                     * conditions that might also gate a
+                                     * sound definition.
+                                     */
+                                    if (
+                                        declaredCustomVariables.contains(
+                                            variableName
+                                        ) ||
+                                        looksLikeEmergencyVariable(
+                                            variableName
+                                        )
+                                    ) {
+
+                                        setMTSCustomVariable(
+                                            owner,
+                                            variableName,
+                                            value
+                                        );
+
+                                        matched++;
+                                    }
+
+                                } catch (Exception ignored) {
+                                }
+                            }
+                        }
+                    }
+                }
+
+            } catch (Exception ignored) {
+            }
+
+        } catch (Exception ignored) {
+        }
+
+        return matched;
     }
 
     private static void setEmergencyVariableEverywhere(
@@ -4941,10 +5230,11 @@ public class GTACore {
             () -> Component.literal(
                 "Wanted: "
                     + wantedLevel
-                    + " | siren="
+                    + " | common siren var="
                     + (sirenValue > 0.5)
-                    + " | emergency lights="
+                    + " | common emergency var="
                     + (emergencyLightsValue > 0.5)
+                    + " (use /gta emergencyscan for pack-specific vars)"
             ),
             false
         );
