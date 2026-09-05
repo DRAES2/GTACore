@@ -1040,6 +1040,9 @@ public class GTACore {
             PoliceUnit unit =
                 managed.getUnit();
 
+            PoliceUnitManager.DriveState unitDrive =
+                managed.getDrive();
+
             String vehicleText =
                 unit.getVehicleId() == null
                     ? "none"
@@ -1058,7 +1061,17 @@ public class GTACore {
                     + " | vehicle="
                     + vehicleText
                     + " | state="
-                    + unit.getState();
+                    + unit.getState()
+                    + " | road="
+                    + (
+                        unitDrive.roadUsingPath
+                            ? (
+                                (unitDrive.roadRouteIndex + 1)
+                                    + "/"
+                                    + unitDrive.roadRoute.size()
+                            )
+                            : "direct"
+                    );
 
             source.sendSuccess(
                 () ->
